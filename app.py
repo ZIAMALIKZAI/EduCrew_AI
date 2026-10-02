@@ -9,9 +9,15 @@ from services.agent_service import AgentService
 from services.document_service import DocumentService
 from services.timetable_service import TimetableService
 
-st.set_page_config(page_title="EduCrew AI - Autonomous School Assistant", page_icon="🎓", layout="wide")
+st.set_page_config(
+    page_title="EduCrew AI - Autonomous School Assistant",
+    page_icon="🎓",
+    layout="wide"
+)
+
 apply_custom_styles()
 
+# ----------------- SIDEBAR CONTROLS -----------------
 with st.sidebar:
     st.title("⚙️ EduCrew Settings")
     env_api_key = os.getenv("GEMINI_API_KEY", "")
@@ -19,12 +25,21 @@ with st.sidebar:
     if api_key_input:
         os.environ["GEMINI_API_KEY"] = api_key_input
 
-    model_choice = st.selectbox("Gemini Engine", options=["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
+    model_choice = st.selectbox(
+        "Gemini Engine",
+        options=["gemini-1.5-flash", "gemini-1.5-pro"],
+        index=0,
+        help="gemini-1.5-flash is fast; gemini-1.5-pro provides deeper pedagogical analysis."
+    )
+
     st.markdown("---")
-    app_mode = st.radio("Select Capability", ["Multi-Agent Lesson & Quiz Architect", "Automated Timetable Generator"])
+    app_mode = st.radio(
+        "Select Capability",
+        ["Multi-Agent Lesson & Quiz Architect", "Automated Timetable Generator"]
+    )
 
 st.markdown('<div class="main-header">🎓 EduCrew AI: Multi-Agent Teacher Platform</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Collaborative Generative Agents for Pedagogical Planning and School Scheduling</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Collaborative Generative Agents for Pedagogical Planning and Automated School Scheduling</div>', unsafe_allow_html=True)
 
 # ----------------- MODULE 1: MULTI-AGENT LESSON ARCHITECT -----------------
 if app_mode == "Multi-Agent Lesson & Quiz Architect":
@@ -66,53 +81,33 @@ if app_mode == "Multi-Agent Lesson & Quiz Architect":
 
 # ----------------- MODULE 2: TIMETABLE GENERATOR -----------------
 elif app_mode == "Automated Timetable Generator":
-    st.subheader("📅 School Timetable Generator (Same-Period Consistency & Multi-Class)")
+    st.subheader("📅 School Timetable Generator (With Class Names & Same-Period Timing)")
     st.write(
-        "Upload a roster file (CSV/Excel). The algorithm guarantees:\n"
-        "- **Consistent Timing:** If a teacher has multiple periods with a class, they take place at the **same period/time** on different days.\n"
-        "- **Max 1 Period/Day:** Teachers do not take more than one period with the same class on the same day.\n"
-        "- **Farm Master Priority:** Period 1 is reserved for the Farm Master from Monday to Saturday.\n"
-        "- **Friday Short Day:** Exactly 5 periods on Friday; 8 periods on other days."
+        "Upload a CSV/Excel file with teacher details. The engine guarantees:\n"
+        "- **Class Name Displayed**: Every schedule clearly states the Class in the first column.\n"
+        "- **Consistent Slot Timing**: A teacher teaching the same class multiple days takes the **same period/time**.\n"
+        "- **Farm Master Lock**: Period 1 on Monday to Saturday is reserved for the Farm Master.\n"
+        "- **Friday Constraint**: Exactly 5 periods on Friday; 8 periods on other days."
     )
 
     template_df = pd.DataFrame({
-        "Teacher Name": [
-            "Mr. Ahmad Khan",
-            "Ms. Fatima Noor",
-            "Mr. Tariq Mehmood",
-            "Ms. Ayesha Bibi",
-            "Mr. Tariq Mehmood"
-        ],
-        "Designation": [
-            "Farm Master",
-            "Senior Subject Specialist",
-            "Subject Specialist",
-            "Junior Teacher",
-            "Subject Specialist"
-        ],
-        "Class": [
-            "Class 10th",
-            "Class 10th",
-            "Class 10th",
-            "Class 10th",
-            "Class 9th"
-        ],
+        "Class": ["10th-A", "10th-A", "10th-A", "9th-B", "9th-B"],
+        "Teacher Name": ["Mr. Ahmad Khan", "Ms. Fatima Noor", "Mr. Tariq Mehmood", "Ms. Ayesha Bibi", "Mr. Tariq Mehmood"],
+        "Designation": ["Farm Master", "Senior Subject Specialist", "Subject Specialist", "Junior Teacher", "Subject Specialist"],
         "Periods Per Week": [6, 4, 3, 4, 3],
-        "Subject": [
-            "Agriculture & Biology",
-            "Physics",
-            "Mathematics",
-            "English",
-            "Mathematics"
-        ]
+        "Subject": ["Agriculture & Biology", "Physics", "Mathematics", "English", "Mathematics"]
     })
 
-    with st.expander("ℹ️ Expected File Format (Preview & Download Sample)"):
+    with st.expander("ℹ️ Expected File Format (Preview & Download Sample CSV)"):
         st.dataframe(template_df)
         csv_sample = template_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Sample CSV", csv_sample, "sample_teachers.csv", "text/csv")
+        st.download_button("Download Sample CSV with Class Column", csv_sample, "sample_teachers_with_class.csv", "text/csv")
 
-    timetable_file = st.file_uploader("Upload Teachers Data File", type=["csv", "xlsx", "xls"])
+    col_upload, col_fallback = st.columns([2, 1])
+    with col_upload:
+        timetable_file = st.file_uploader("Upload Teachers Data File", type=["csv", "xlsx", "xls"])
+    with col_fallback:
+        default_cls = st.text_input("Default Class Name (if file has no Class column)", value="10th Class")
 
     if timetable_file:
         saved_tt_path = UPLOADS_DIR / timetable_file.name
@@ -122,33 +117,33 @@ elif app_mode == "Automated Timetable Generator":
         try:
             df_in = DocumentService.read_tabular(saved_tt_path)
             st.write("Loaded Data Preview:")
-            st.dataframe(df_in.head(8))
+            st.dataframe(df_in.head(8), use_container_width=True)
 
             if st.button("⚡ Generate Weekly Timetable"):
-                with st.spinner("Generating timetable based on constraints..."):
-                    day_tables, err = TimetableService.generate_timetable(df_in)
+                with st.spinner("Generating schedules and resolving conflicts..."):
+                    day_tables, err = TimetableService.generate_timetable(df_in, default_class_name=default_cls)
                     if err:
                         st.error(err)
                     else:
-                        st.success("Timetable generated successfully!")
+                        st.success("Timetable generated successfully with all Class assignments!")
+                        
                         tabs = st.tabs(list(day_tables.keys()))
-                        for idx, sheet_name in enumerate(day_tables.keys()):
+                        for idx, tab_name in enumerate(day_tables.keys()):
                             with tabs[idx]:
-                                st.write(f"### Schedule: {sheet_name}")
-                                st.dataframe(day_tables[sheet_name], use_container_width=True)
+                                st.write(f"### 📋 {tab_name}")
+                                st.dataframe(day_tables[tab_name], use_container_width=True)
 
                         output_excel = UPLOADS_DIR / "Generated_Weekly_Timetable.xlsx"
                         with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
                             for sheet_name, ddf in day_tables.items():
-                                # Excel sheet name limit is 31 characters
-                                safe_name = sheet_name[:31]
+                                safe_name = sheet_name.replace(":", "-").replace("/", "-")[:31]
                                 ddf.to_excel(writer, sheet_name=safe_name, index=False)
 
                         with open(output_excel, "rb") as f:
                             st.download_button(
                                 label="📥 Download Complete Timetable (Excel)",
                                 data=f.read(),
-                                file_name="Weekly_Timetable.xlsx",
+                                file_name="Weekly_School_Timetable.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
         except Exception as ex:
