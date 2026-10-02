@@ -7,11 +7,9 @@ class TimetableService:
     - 6-Day school week (Monday to Saturday).
     - Mon, Tue, Wed, Thu, Sat: 8 periods.
     - Friday: 5 periods.
-    - Farm Master: Always takes Period 1 from Monday to Saturday.
-    - Consistency Rule: If a teacher visits the same class multiple days, 
-      they are placed in the SAME period slot across those days.
-    - Max 1 period per teacher per class per day.
-    - Zero teacher conflict across different classes.
+    - Farm Master: Period 1 from Monday to Saturday.
+    - Consistency: Same period/time slot across different days for the same class.
+    - Prominently displays and preserves Class Name in all outputs.
     """
 
     DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
@@ -21,20 +19,26 @@ class TimetableService:
         return 5 if day == "Friday" else 8
 
     @classmethod
-    def generate_timetable(cls, df: pd.DataFrame) -> Tuple[Dict[str, pd.DataFrame], str]:
-        # Normalize columns for flexible file uploads
-        col_map = {c.strip().lower(): c for c in df.columns}
+    def generate_timetable(cls, df: pd.DataFrame, default_class_name: str = "Class 10th") -> Tuple[Dict[str, pd.DataFrame], str]:
+        # Normalize columns for flexible file matching
+        col_map = {str(c).strip().lower(): c for c in df.columns}
         
         req_cols = ["teacher_name", "designation", "periods_per_week", "subject"]
         matched = {}
         for req in req_cols:
             found = next((col_map[c] for c in col_map if req.replace("_", "") in c.replace("_", "").replace(" ", "")), None)
             if not found:
-                return {}, f"Missing column: Please ensure your file has {req.replace('_', ' ').title()}."
+                return {}, f"Missing column: Please ensure your file has '{req.replace('_', ' ').title()}'."
             matched[req] = found
 
-        # Class column is optional; defaults to "Class 10" if not present
-        class_col = next((col_map[c] for c in col_map if "class" in c.replace("_", "").replace(" ", "") or "grade" in c), None)
+        # Detect class column flexibly
+        class_col_candidates = ["class", "classname", "class_name", "grade", "section", "standard", "cls"]
+        class_col = None
+        for cand in class_col_candidates:
+            found = next((col_map[c] for c in col_map if cand in c.replace("_", "").replace(" ", "")), None)
+            if found:
+                class_col = found
+                break
 
         # 1. Parse teacher records
         teacher_entries = []
@@ -44,7 +48,12 @@ class TimetableService:
             t_name = str(row[matched["teacher_name"]]).strip()
             desig = str(row[matched["designation"]]).strip()
             subj = str(row[matched["subject"]]).strip()
-            cls_assigned = str(row[class_col]).strip() if class_col and pd.notna(row[class_col]) else "Class 10"
+
+            # Extract Class Name cleanly
+            if class_col and pd.notna(row[class_col]) and str(row[class_col]).strip():
+                cls_assigned = str(row[class_col]).strip()
+            else:
+                cls_assigned = default_class_name.strip()
             
             try:
                 periods = int(row[matched["periods_per_week"]])
@@ -67,34 +76,40 @@ class TimetableService:
 
             teacher_entries.append(entry)
 
-        # Identify all distinct classes
-        classes = sorted(list({t["target_class"] for t in teacher_entries}))
+        # Unique classes
+        classes = sorted(list({t["target_class"] for t in teacher_entries if t["target_class"]}))
+        if not classes:
+            classes = [default_class_name]
 
-        # 2. Initialize Master Schedule: Class -> Day -> Period (0-7)
-        # Structure: master_schedule[cls][day][period_idx] = assignment_dict
+        # 2. Initialize Master Schedule: Class -> Day -> Period Slots
         master_schedule = {
-            cls: {
-                day: [{"period": p + 1, "teacher": "FREE", "subject": "-", "designation": "-"} 
-                      for p in range(cls.get_day_periods(day))]
+            c_name: {
+                day: [{
+                    "period": p + 1,
+                    "class": c_name,
+                    "teacher": "FREE",
+                    "subject": "-",
+                    "designation": "-"
+                } for p in range(cls.get_day_periods(day))]
                 for day in cls.DAYS
             }
-            for cls in classes
+            for c_name in classes
         }
 
-        # 3. Rule 1: Farm Master gets Period 1 on all 6 days (Mon-Sat)
+        # 3. Farm Master Rule: Lock into Period 1 for every day
         if farm_master:
             fm_class = farm_master["target_class"]
             for day in cls.DAYS:
                 master_schedule[fm_class][day][0] = {
                     "period": 1,
+                    "class": fm_class,
                     "teacher": farm_master["teacher"],
                     "subject": farm_master["subject"],
                     "designation": farm_master["designation"]
                 }
                 farm_master["periods"] = max(0, farm_master["periods"] - 1)
 
-        # 4. Schedule other teachers with the Same-Period Consistency Rule
-        # Sort teachers: highest workload first to allocate prime fixed slots
+        # 4. Schedule teachers with the Same-Period Consistency Rule
         teacher_entries.sort(key=lambda x: x["periods"], reverse=True)
 
         for entry in teacher_entries:
@@ -104,82 +119,65 @@ class TimetableService:
 
             target_cls = entry["target_class"]
             t_name = entry["teacher"]
-            is_fm = entry["is_farm"]
-
-            # Possible period slots: skip Period 1 (index 0) if Farm Master is active
             available_slots = list(range(1 if farm_master else 0, 8))
 
-            # Pick the best consistent period slot for this teacher-class pair
+            # Find best fixed period slot
             chosen_slot = None
             for p_slot in available_slots:
-                # Count on how many days this slot is free for both this class and this teacher
                 free_days_count = 0
                 for day in cls.DAYS:
-                    # Slot must exist on this day (Friday only has slots 0-4)
                     if p_slot >= cls.get_day_periods(day):
                         continue
-                    
-                    # Check class slot is empty
                     if master_schedule[target_cls][day][p_slot]["teacher"] != "FREE":
                         continue
 
-                    # Check teacher is not already booked in another class in the same day & slot
-                    teacher_busy = False
-                    for other_cls in classes:
-                        if master_schedule[other_cls][day][p_slot]["teacher"] == t_name:
-                            teacher_busy = True
-                            break
-
+                    # Teacher conflict check
+                    teacher_busy = any(master_schedule[oc][day][p_slot]["teacher"] == t_name for oc in classes)
                     if not teacher_busy:
                         free_days_count += 1
 
-                # If this slot can accommodate all or most of the weekly demand, lock it in
                 if free_days_count >= min(rem_periods, 4):
                     chosen_slot = p_slot
                     break
 
-            # Fallback if no single slot was ideal
             if chosen_slot is None:
                 chosen_slot = available_slots[0]
 
-            # Assign teacher across different days in the chosen consistent period slot
+            # Place across days in same slot
             for day in cls.DAYS:
                 if rem_periods <= 0:
                     break
-
                 if chosen_slot >= cls.get_day_periods(day):
                     continue
 
-                # Check if this class is free in the chosen slot
                 if master_schedule[target_cls][day][chosen_slot]["teacher"] == "FREE":
-                    # Check teacher isn't busy in another class
-                    is_busy = any(master_schedule[c][day][chosen_slot]["teacher"] == t_name for c in classes)
-                    if not is_busy:
+                    busy = any(master_schedule[oc][day][chosen_slot]["teacher"] == t_name for oc in classes)
+                    if not busy:
                         master_schedule[target_cls][day][chosen_slot] = {
                             "period": chosen_slot + 1,
+                            "class": target_cls,
                             "teacher": t_name,
                             "subject": entry["subject"],
                             "designation": entry["designation"]
                         }
                         rem_periods -= 1
 
-            # If any periods remain (e.g. slots clashed), place them in alternative free slots (1 per day)
+            # Distribute leftovers to avoid gaps
             if rem_periods > 0:
                 for day in cls.DAYS:
                     if rem_periods <= 0:
                         break
-                    # Ensure teacher doesn't already have a period with this class today
-                    already_in_day = any(master_schedule[target_cls][day][p]["teacher"] == t_name 
-                                         for p in range(cls.get_day_periods(day)))
+                    already_in_day = any(master_schedule[target_cls][day][p]["teacher"] == t_name for p in range(cls.get_day_periods(day)))
                     if already_in_day:
                         continue
 
                     for alt_slot in range(cls.get_day_periods(day)):
                         if master_schedule[target_cls][day][alt_slot]["teacher"] == "FREE":
-                            busy = any(master_schedule[c][day][alt_slot]["teacher"] == t_name for c in classes)
+                            busy = any(master_schedule[oc][day][alt_slot]["teacher"] == t_name for oc in classes)
                             if not busy:
                                 master_schedule[target_cls][day][alt_slot] = {
                                     "period": alt_slot + 1,
+                                    "class": target_cls,
                                     "teacher": t_name,
                                     "subject": entry["subject"],
                                     "designation": entry["designation"]
@@ -187,20 +185,20 @@ class TimetableService:
                                 rem_periods -= 1
                                 break
 
-        # 5. Format output into clean DataFrames grouped by Class and Day
+        # 5. Build output tables with Class Name explicitly in column 1
         day_dfs = {}
-        for cls_name in classes:
+        for c_name in classes:
             for day in cls.DAYS:
-                sheet_key = f"{cls_name} - {day}" if len(classes) > 1 else day
+                tab_key = f"{c_name} - {day}" if len(classes) > 1 else day
                 day_rows = []
-                for item in master_schedule[cls_name][day]:
+                for item in master_schedule[c_name][day]:
                     day_rows.append({
+                        "Class": item["class"],
                         "Period": f"Period {item['period']}",
-                        "Class": cls_name,
-                        "Teacher": item["teacher"],
+                        "Teacher Name": item["teacher"],
                         "Subject": item["subject"],
                         "Designation": item["designation"]
                     })
-                day_dfs[sheet_key] = pd.DataFrame(day_rows)
+                day_dfs[tab_key] = pd.DataFrame(day_rows)
 
         return day_dfs, ""
