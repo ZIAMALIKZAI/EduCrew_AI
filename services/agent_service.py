@@ -1,8 +1,10 @@
+import time
 from crewai import Crew, Task, Process
 from agents.teacher_agents import TeacherCrewAgents
 
 class AgentService:
     def __init__(self, model_name: str = "gemini-1.5-flash"):
+        self.model_name = model_name
         self.agent_factory = TeacherCrewAgents(model_name=model_name)
 
     def run_lesson_planning_workflow(self, topic: str, grade_level: str, context_text: str = "") -> str:
@@ -42,8 +44,28 @@ class AgentService:
             agents=[planner, assessor, differentiator],
             tasks=[t1, t2, t3],
             process=Process.sequential,
-            verbose=True
+            verbose=True,
+            max_rpm=10  # Enforces a rate limit so Google does not drop calls with 503/429
         )
 
-        result = crew.kickoff()
-        return str(result)
+        try:
+            result = crew.kickoff()
+            return str(result)
+        except Exception as e:
+            # If default model still throttles, try fallback model
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                fallback_model = "gemini-1.5-pro" if "flash" in self.model_name else "gemini-1.5-flash"
+                time.sleep(3)
+                fallback_factory = TeacherCrewAgents(model_name=fallback_model)
+                fallback_crew = Crew(
+                    agents=[
+                        fallback_factory.curriculum_planner_agent(),
+                        fallback_factory.assessment_specialist_agent(),
+                        fallback_factory.student_support_agent()
+                    ],
+                    tasks=[t1, t2, t3],
+                    process=Process.sequential,
+                    max_rpm=10
+                )
+                return str(fallback_crew.kickoff())
+            raise e
