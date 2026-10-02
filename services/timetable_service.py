@@ -2,16 +2,6 @@ import pandas as pd
 from typing import Dict, List, Tuple
 
 class TimetableService:
-    """
-    Automated Multi-Class School Timetable Generator:
-    - 6-Day school week (Monday to Saturday).
-    - Mon, Tue, Wed, Thu, Sat: 8 periods.
-    - Friday: 5 periods.
-    - Farm Master: Period 1 from Monday to Saturday.
-    - Consistency: Same period/time slot across different days for the same class.
-    - Prominently displays and preserves Class Name in all outputs.
-    """
-
     DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
     @classmethod
@@ -20,7 +10,6 @@ class TimetableService:
 
     @classmethod
     def generate_timetable(cls, df: pd.DataFrame, default_class_name: str = "Class 10th") -> Tuple[Dict[str, pd.DataFrame], str]:
-        # Normalize columns for flexible file matching
         col_map = {str(c).strip().lower(): c for c in df.columns}
         
         req_cols = ["teacher_name", "designation", "periods_per_week", "subject"]
@@ -31,7 +20,6 @@ class TimetableService:
                 return {}, f"Missing column: Please ensure your file has '{req.replace('_', ' ').title()}'."
             matched[req] = found
 
-        # Detect class column flexibly
         class_col_candidates = ["class", "classname", "class_name", "grade", "section", "standard", "cls"]
         class_col = None
         for cand in class_col_candidates:
@@ -40,7 +28,6 @@ class TimetableService:
                 class_col = found
                 break
 
-        # 1. Parse teacher records
         teacher_entries = []
         farm_master = None
 
@@ -49,7 +36,6 @@ class TimetableService:
             desig = str(row[matched["designation"]]).strip()
             subj = str(row[matched["subject"]]).strip()
 
-            # Extract Class Name cleanly
             if class_col and pd.notna(row[class_col]) and str(row[class_col]).strip():
                 cls_assigned = str(row[class_col]).strip()
             else:
@@ -76,12 +62,10 @@ class TimetableService:
 
             teacher_entries.append(entry)
 
-        # Unique classes
         classes = sorted(list({t["target_class"] for t in teacher_entries if t["target_class"]}))
         if not classes:
             classes = [default_class_name]
 
-        # 2. Initialize Master Schedule: Class -> Day -> Period Slots
         master_schedule = {
             c_name: {
                 day: [{
@@ -96,7 +80,6 @@ class TimetableService:
             for c_name in classes
         }
 
-        # 3. Farm Master Rule: Lock into Period 1 for every day
         if farm_master:
             fm_class = farm_master["target_class"]
             for day in cls.DAYS:
@@ -109,7 +92,6 @@ class TimetableService:
                 }
                 farm_master["periods"] = max(0, farm_master["periods"] - 1)
 
-        # 4. Schedule teachers with the Same-Period Consistency Rule
         teacher_entries.sort(key=lambda x: x["periods"], reverse=True)
 
         for entry in teacher_entries:
@@ -121,7 +103,6 @@ class TimetableService:
             t_name = entry["teacher"]
             available_slots = list(range(1 if farm_master else 0, 8))
 
-            # Find best fixed period slot
             chosen_slot = None
             for p_slot in available_slots:
                 free_days_count = 0
@@ -131,7 +112,6 @@ class TimetableService:
                     if master_schedule[target_cls][day][p_slot]["teacher"] != "FREE":
                         continue
 
-                    # Teacher conflict check
                     teacher_busy = any(master_schedule[oc][day][p_slot]["teacher"] == t_name for oc in classes)
                     if not teacher_busy:
                         free_days_count += 1
@@ -143,7 +123,6 @@ class TimetableService:
             if chosen_slot is None:
                 chosen_slot = available_slots[0]
 
-            # Place across days in same slot
             for day in cls.DAYS:
                 if rem_periods <= 0:
                     break
@@ -162,7 +141,6 @@ class TimetableService:
                         }
                         rem_periods -= 1
 
-            # Distribute leftovers to avoid gaps
             if rem_periods > 0:
                 for day in cls.DAYS:
                     if rem_periods <= 0:
@@ -185,7 +163,6 @@ class TimetableService:
                                 rem_periods -= 1
                                 break
 
-        # 5. Build output tables with Class Name explicitly in column 1
         day_dfs = {}
         for c_name in classes:
             for day in cls.DAYS:
