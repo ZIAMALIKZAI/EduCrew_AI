@@ -24,8 +24,9 @@ with st.sidebar:
     app_mode = st.radio("Select Capability", ["Multi-Agent Lesson & Quiz Architect", "Automated Timetable Generator"])
 
 st.markdown('<div class="main-header">🎓 EduCrew AI: Multi-Agent Teacher Platform</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Collaborative Generative Agents for Lesson Design and School Scheduling</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Collaborative Generative Agents for Pedagogical Planning and School Scheduling</div>', unsafe_allow_html=True)
 
+# ----------------- MODULE 1: MULTI-AGENT LESSON ARCHITECT -----------------
 if app_mode == "Multi-Agent Lesson & Quiz Architect":
     st.subheader("🤖 Multi-Agent Curriculum & Assessment Team")
     st.write("Specialized agents design your lesson plan, formulate assessments, and differentiate for different learner needs.")
@@ -43,7 +44,7 @@ if app_mode == "Multi-Agent Lesson & Quiz Architect":
         elif not topic:
             st.warning("Please specify a topic.")
         else:
-            with st.spinner("Agents are collaborating on your lesson pack... critic and creator at work..."):
+            with st.spinner("Agents are collaborating on your lesson pack..."):
                 doc_text = ""
                 if uploaded_doc:
                     saved_path = UPLOADS_DIR / uploaded_doc.name
@@ -63,15 +64,47 @@ if app_mode == "Multi-Agent Lesson & Quiz Architect":
                     mime="text/markdown"
                 )
 
+# ----------------- MODULE 2: TIMETABLE GENERATOR -----------------
 elif app_mode == "Automated Timetable Generator":
-    st.subheader("📅 School Timetable Generator")
-    st.write("Upload a CSV/Excel file with teacher workloads. The engine builds Monday-Saturday schedules with 5 periods on Friday and reserves Period 1 for the Farm Master.")
+    st.subheader("📅 School Timetable Generator (Same-Period Consistency & Multi-Class)")
+    st.write(
+        "Upload a roster file (CSV/Excel). The algorithm guarantees:\n"
+        "- **Consistent Timing:** If a teacher has multiple periods with a class, they take place at the **same period/time** on different days.\n"
+        "- **Max 1 Period/Day:** Teachers do not take more than one period with the same class on the same day.\n"
+        "- **Farm Master Priority:** Period 1 is reserved for the Farm Master from Monday to Saturday.\n"
+        "- **Friday Short Day:** Exactly 5 periods on Friday; 8 periods on other days."
+    )
 
     template_df = pd.DataFrame({
-        "Teacher Name": ["Mr. Ahmad Khan", "Ms. Fatima Noor", "Mr. Tariq Mehmood", "Ms. Ayesha Bibi"],
-        "Designation": ["Farm Master", "Senior Subject Specialist", "Subject Specialist", "Junior Teacher"],
-        "Periods Per Week": [6, 12, 14, 13],
-        "Subject": ["Agriculture & Biology", "Physics", "Mathematics", "English"]
+        "Teacher Name": [
+            "Mr. Ahmad Khan",
+            "Ms. Fatima Noor",
+            "Mr. Tariq Mehmood",
+            "Ms. Ayesha Bibi",
+            "Mr. Tariq Mehmood"
+        ],
+        "Designation": [
+            "Farm Master",
+            "Senior Subject Specialist",
+            "Subject Specialist",
+            "Junior Teacher",
+            "Subject Specialist"
+        ],
+        "Class": [
+            "Class 10th",
+            "Class 10th",
+            "Class 10th",
+            "Class 10th",
+            "Class 9th"
+        ],
+        "Periods Per Week": [6, 4, 3, 4, 3],
+        "Subject": [
+            "Agriculture & Biology",
+            "Physics",
+            "Mathematics",
+            "English",
+            "Mathematics"
+        ]
     })
 
     with st.expander("ℹ️ Expected File Format (Preview & Download Sample)"):
@@ -89,7 +122,7 @@ elif app_mode == "Automated Timetable Generator":
         try:
             df_in = DocumentService.read_tabular(saved_tt_path)
             st.write("Loaded Data Preview:")
-            st.dataframe(df_in.head(6))
+            st.dataframe(df_in.head(8))
 
             if st.button("⚡ Generate Weekly Timetable"):
                 with st.spinner("Generating timetable based on constraints..."):
@@ -99,15 +132,17 @@ elif app_mode == "Automated Timetable Generator":
                     else:
                         st.success("Timetable generated successfully!")
                         tabs = st.tabs(list(day_tables.keys()))
-                        for idx, day in enumerate(day_tables.keys()):
+                        for idx, sheet_name in enumerate(day_tables.keys()):
                             with tabs[idx]:
-                                st.write(f"### Schedule for {day} ({len(day_tables[day])} Periods)")
-                                st.dataframe(day_tables[day], use_container_width=True)
+                                st.write(f"### Schedule: {sheet_name}")
+                                st.dataframe(day_tables[sheet_name], use_container_width=True)
 
                         output_excel = UPLOADS_DIR / "Generated_Weekly_Timetable.xlsx"
                         with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
-                            for day, ddf in day_tables.items():
-                                ddf.to_excel(writer, sheet_name=day, index=False)
+                            for sheet_name, ddf in day_tables.items():
+                                # Excel sheet name limit is 31 characters
+                                safe_name = sheet_name[:31]
+                                ddf.to_excel(writer, sheet_name=safe_name, index=False)
 
                         with open(output_excel, "rb") as f:
                             st.download_button(
