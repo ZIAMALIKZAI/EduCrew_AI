@@ -1,6 +1,7 @@
 import os
 import streamlit as st
 import pandas as pd
+from datetime import datetime
 from pathlib import Path
 
 from core.config import UPLOADS_DIR
@@ -8,6 +9,7 @@ from ui.styles import apply_custom_styles
 from services.agent_service import AgentService
 from services.document_service import DocumentService
 from services.timetable_service import TimetableService
+from services.attendance_service import AttendanceService
 
 st.set_page_config(
     page_title="EduCrew AI - Autonomous School Assistant",
@@ -17,7 +19,6 @@ st.set_page_config(
 
 apply_custom_styles()
 
-# ----------------- SIDEBAR CONTROLS -----------------
 with st.sidebar:
     st.title("⚙️ EduCrew Settings")
     env_api_key = os.getenv("GEMINI_API_KEY", "")
@@ -28,20 +29,23 @@ with st.sidebar:
     model_choice = st.selectbox(
         "Gemini Engine",
         options=["gemini-1.5-flash", "gemini-1.5-pro"],
-        index=0,
-        help="gemini-1.5-flash is fast; gemini-1.5-pro provides deeper pedagogical analysis."
+        index=0
     )
 
     st.markdown("---")
     app_mode = st.radio(
         "Select Capability",
-        ["Multi-Agent Lesson & Quiz Architect", "Automated Timetable Generator"]
+        [
+            "Multi-Agent Lesson & Quiz Architect",
+            "Automated Timetable Generator",
+            "Live QR Attendance & Agent Monitor"
+        ]
     )
 
 st.markdown('<div class="main-header">🎓 EduCrew AI: Multi-Agent Teacher Platform</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Collaborative Generative Agents for Pedagogical Planning and Automated School Scheduling</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Collaborative Generative Agents for Lesson Design, Timetables, and Attendance</div>', unsafe_allow_html=True)
 
-# ----------------- MODULE 1: MULTI-AGENT LESSON ARCHITECT -----------------
+# 1. LESSON ARCHITECT
 if app_mode == "Multi-Agent Lesson & Quiz Architect":
     st.subheader("🤖 Multi-Agent Curriculum & Assessment Team")
     st.write("Specialized agents design your lesson plan, formulate assessments, and differentiate for different learner needs.")
@@ -79,7 +83,7 @@ if app_mode == "Multi-Agent Lesson & Quiz Architect":
                     mime="text/markdown"
                 )
 
-# ----------------- MODULE 2: TIMETABLE GENERATOR -----------------
+# 2. TIMETABLE GENERATOR
 elif app_mode == "Automated Timetable Generator":
     st.subheader("📅 School Timetable Generator (With Class Names & Same-Period Timing)")
     st.write(
@@ -148,3 +152,75 @@ elif app_mode == "Automated Timetable Generator":
                             )
         except Exception as ex:
             st.error(f"Error parsing file: {ex}")
+
+# 3. QR ATTENDANCE SCANNER
+elif app_mode == "Live QR Attendance & Agent Monitor":
+    st.subheader("📷 Live QR Attendance & Agent Verification")
+    st.write("Point an ID card QR code at the camera. The AI Attendance Agent parses the person, checks punctuality against the 8:00 AM bell, and logs the entry.")
+
+    with st.expander("🛠️ Generate Test QR Codes (Print or Scan from Phone Screen)"):
+        st.write("Copy or display any of these sample text strings in any QR generator (format: `ID|Name|Role|Class`):")
+        st.code("T101|Mr. Ahmad Khan|Teacher - Farm Master|Class 10th", language="text")
+        st.code("S502|Zia Malik|Student|Class 10th-A", language="text")
+        st.code("S503|Ayesha Noor|Student|Class 9th-B", language="text")
+
+    cam_col, result_col = st.columns([1, 1])
+
+    with cam_col:
+        st.write("#### 🎥 Live Camera Input")
+        camera_image = st.camera_input("Hold ID QR Code in front of camera")
+
+    with result_col:
+        st.write("#### 📋 Verification & Agent Actions")
+        if camera_image:
+            raw_bytes = camera_image.getvalue()
+            qr_content = AttendanceService.decode_qr(raw_bytes)
+
+            if not qr_content:
+                st.warning("⚠️ No QR code recognized. Ensure the card is held close, stable, and well-lit.")
+            else:
+                st.success(f"Scanned QR Code: `{qr_content}`")
+                parts = [p.strip() for p in qr_content.split("|")]
+                
+                person_id = parts[0] if len(parts) > 0 else "UNKNOWN"
+                name = parts[1] if len(parts) > 1 else "Unknown Person"
+                role = parts[2] if len(parts) > 2 else "Student"
+                class_name = parts[3] if len(parts) > 3 else "General"
+                current_time = datetime.now().strftime("%I:%M %p")
+
+                with st.spinner("AI Attendance Agent evaluating status..."):
+                    ai_res = AttendanceService.evaluate_attendance_with_ai(
+                        person_id=person_id,
+                        name=name,
+                        role=role,
+                        class_name=class_name,
+                        scan_time_str=current_time
+                    )
+
+                AttendanceService.log_attendance(
+                    person_id=person_id,
+                    name=name,
+                    role=role,
+                    class_name=class_name,
+                    status=ai_res["status"],
+                    notes=ai_res["note"]
+                )
+
+                st.markdown(f"**Name:** {name}")
+                st.markdown(f"**Role:** {role} | **Class:** {class_name}")
+                st.markdown(f"**Check-in Time:** {current_time}")
+                st.markdown(f"**Status:** `{ai_res['status']}`")
+                st.info(f"**Admin Note:** {ai_res['note']}")
+                
+                if ai_res.get("sms") and ai_res["sms"] != "None":
+                    st.warning(f"📱 **Automated Parent SMS:** {ai_res['sms']}")
+
+    st.markdown("---")
+    st.write("### 📊 Today's Attendance Register")
+    current_logs = AttendanceService.get_logs()
+    if not current_logs.empty:
+        st.dataframe(current_logs, use_container_width=True)
+        csv_data = current_logs.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Export Attendance Sheet (CSV)", csv_data, "daily_attendance.csv", "text/csv")
+    else:
+        st.info("No attendance recorded yet today.")
