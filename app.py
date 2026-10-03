@@ -1,16 +1,155 @@
 import os
+import io
+import zipfile
+import cv2
+import numpy as np
+import qrcode
+from PIL import Image
 import streamlit as st
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
 
 from core.config import UPLOADS_DIR
+from core.gemini import get_llm
 from ui.styles import apply_custom_styles
 from services.agent_service import AgentService
 from services.document_service import DocumentService
 from services.timetable_service import TimetableService
-from services.attendance_service import AttendanceService
 
+# ----------------- ATTENDANCE & QR UTILITIES -----------------
+class AttendanceService:
+    LOG_FILE = UPLOADS_DIR / "attendance_log.csv"
+
+    @classmethod
+    def generate_single_qr(cls, person_id: str, name: str, role: str, class_name: str) -> Image.Image:
+        """Encodes standard EduCrew format (ID|Name|Role|Class) into a QR image."""
+        payload = f"{person_id.strip()}|{name.strip()}|{role.strip()}|{class_name.strip()}"
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(payload)
+        qr.make(fit=True)
+        return qr.make_image(fill_color="black", back_color="white").convert("RGB")
+
+    @classmethod
+    def generate_bulk_qr_zip(cls, df: pd.DataFrame) -> bytes:
+        """Parses a roster dataframe and bundles all generated QR codes into a ZIP file."""
+        col_map = {str(c).strip().lower(): c for c in df.columns}
+        
+        # Flexible column resolution
+        id_col = next((col_map[c] for c in col_map if "id" in c or "roll" in c), None)
+        name_col = next((col_map[c] for c in col_map if "name" in c), None)
+        role_col = next((col_map[c] for c in col_map if "role" in c or "designation" in c), None)
+        class_col = next((col_map[c] for c in col_map if "class" in c or "grade" in c), None)
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for idx, row in df.iterrows():
+                p_id = str(row[id_col]).strip() if id_col else f"ID_{idx+1}"
+                p_name = str(row[name_col]).strip() if name_col else f"Person_{idx+1}"
+                p_role = str(row[role_col]).strip() if role_col else "Student"
+                p_class = str(row[class_col]).strip() if class_col else "General"
+
+                img = cls.generate_single_qr(p_id, p_name, p_role, p_class)
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format="PNG")
+                
+                safe_name = "".join(c for c in f"{p_id}_{p_name}" if c.isalnum() or c in (' ', '_', '-')).rstrip()
+                zip_file.writestr(f"{safe_name}.png", img_byte_arr.getvalue())
+
+        zip_buffer.seek(0)
+        return zip_buffer.getvalue()
+
+    @classmethod
+    def decode_qr(cls, image_bytes: bytes) -> str:
+        """Decodes QR code from raw image bytes using OpenCV QRCodeDetector."""
+        try:
+            np_arr = np.frombuffer(image_bytes, np.uint8)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if img is None:
+                return ""
+            detector = cv2.QRCodeDetector()
+            data, bbox, _ = detector.detectAndDecode(img)
+            return data.strip() if data else ""
+        except Exception:
+            return ""
+
+    @classmethod
+    def log_attendance(cls, person_id: str, name: str, role: str, class_name: str, status: str, notes: str) -> pd.DataFrame:
+        now = datetime.now()
+        record = {
+            "Date": now.strftime("%Y-%m-%d"),
+            "Time": now.strftime("%I:%M:%S %p"),
+            "ID": person_id,
+            "Name": name,
+            "Role": role,
+            "Class": class_name,
+            "Status": status,
+            "Remarks": notes
+        }
+        if cls.LOG_FILE.exists():
+            try:
+                df = pd.read_csv(cls.LOG_FILE)
+                df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
+            except Exception:
+                df = pd.DataFrame([record])
+        else:
+            df = pd.DataFrame([record])
+        df.to_csv(cls.LOG_FILE, index=False)
+        return df
+
+    @classmethod
+    def get_logs(cls) -> pd.DataFrame:
+        if cls.LOG_FILE.exists():
+            try:
+                return pd.read_csv(cls.LOG_FILE)
+            except Exception:
+                pass
+        return pd.DataFrame(columns=["Date", "Time", "ID", "Name", "Role", "Class", "Status", "Remarks"])
+
+    @classmethod
+    def evaluate_attendance_with_ai(cls, person_id: str, name: str, role: str, class_name: str, scan_time_str: str) -> dict:
+        try:
+            llm = get_llm()
+            prompt = f"""
+You are an Automated School Attendance Officer.
+Details:
+- Person Name: {name} (ID: {person_id})
+- Role: {role} (Student or Teacher)
+- Class: {class_name}
+- Current Scan Time: {scan_time_str}
+- Official School Gate / Period 1 Start: 08:00 AM
+
+Tasks:
+1. Determine Status: 'Present - On Time' (if scanned before or at 08:10 AM), 'Tardy / Late' (if scanned between 08:11 AM and 09:00 AM), or 'Severely Late' (after 09:00 AM).
+2. Generate a 1-sentence administrative note.
+3. If student is Late, generate a professional 1-sentence SMS alert for their parents.
+
+Output strictly in this format:
+STATUS: <Status>
+NOTE: <Note>
+SMS: <SMS or 'None'>
+"""
+            response = llm.invoke(prompt)
+            text = response.content
+            status, note, sms = "Present", "Checked in successfully.", "None"
+            for line in text.split("\n"):
+                if line.startswith("STATUS:"):
+                    status = line.replace("STATUS:", "").strip()
+                elif line.startswith("NOTE:"):
+                    note = line.replace("NOTE:", "").strip()
+                elif line.startswith("SMS:"):
+                    sms = line.replace("SMS:", "").strip()
+            return {"status": status, "note": note, "sms": sms}
+        except Exception:
+            return {"status": "Present (Logged Offline)", "note": f"System recorded at {scan_time_str}", "sms": "None"}
+
+
+# ----------------- APPLICATION LAYOUT -----------------
 st.set_page_config(
     page_title="EduCrew AI - Autonomous School Assistant",
     page_icon="🎓",
@@ -26,30 +165,24 @@ with st.sidebar:
     if api_key_input:
         os.environ["GEMINI_API_KEY"] = api_key_input
 
-    model_choice = st.selectbox(
-        "Gemini Engine",
-        options=["gemini-1.5-flash", "gemini-1.5-pro"],
-        index=0
-    )
-
+    model_choice = st.selectbox("Gemini Engine", options=["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
     st.markdown("---")
     app_mode = st.radio(
         "Select Capability",
         [
             "Multi-Agent Lesson & Quiz Architect",
             "Automated Timetable Generator",
+            "🪪 ID Card & QR Code Generator",
             "Live QR Attendance & Agent Monitor"
         ]
     )
 
 st.markdown('<div class="main-header">🎓 EduCrew AI: Multi-Agent Teacher Platform</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Collaborative Generative Agents for Lesson Design, Timetables, and Attendance</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Pedagogical Planning, Timetable Engines, Smart QR Generation & Agentic Attendance</div>', unsafe_allow_html=True)
 
-# 1. LESSON ARCHITECT
+# ----------------- MODULE 1: LESSON ARCHITECT -----------------
 if app_mode == "Multi-Agent Lesson & Quiz Architect":
     st.subheader("🤖 Multi-Agent Curriculum & Assessment Team")
-    st.write("Specialized agents design your lesson plan, formulate assessments, and differentiate for different learner needs.")
-
     col1, col2 = st.columns([1, 1])
     with col1:
         topic = st.text_input("Lesson Topic", placeholder="e.g., Photosynthesis and Cellular Respiration")
@@ -83,17 +216,9 @@ if app_mode == "Multi-Agent Lesson & Quiz Architect":
                     mime="text/markdown"
                 )
 
-# 2. TIMETABLE GENERATOR
+# ----------------- MODULE 2: TIMETABLE GENERATOR -----------------
 elif app_mode == "Automated Timetable Generator":
     st.subheader("📅 School Timetable Generator (With Class Names & Same-Period Timing)")
-    st.write(
-        "Upload a CSV/Excel file with teacher details. The engine guarantees:\n"
-        "- **Class Name Displayed**: Every schedule clearly states the Class in the first column.\n"
-        "- **Consistent Slot Timing**: A teacher teaching the same class multiple days takes the **same period/time**.\n"
-        "- **Farm Master Lock**: Period 1 on Monday to Saturday is reserved for the Farm Master.\n"
-        "- **Friday Constraint**: Exactly 5 periods on Friday; 8 periods on other days."
-    )
-
     template_df = pd.DataFrame({
         "Class": ["10th-A", "10th-A", "10th-A", "9th-B", "9th-B"],
         "Teacher Name": ["Mr. Ahmad Khan", "Ms. Fatima Noor", "Mr. Tariq Mehmood", "Ms. Ayesha Bibi", "Mr. Tariq Mehmood"],
@@ -130,7 +255,6 @@ elif app_mode == "Automated Timetable Generator":
                         st.error(err)
                     else:
                         st.success("Timetable generated successfully with all Class assignments!")
-                        
                         tabs = st.tabs(list(day_tables.keys()))
                         for idx, tab_name in enumerate(day_tables.keys()):
                             with tabs[idx]:
@@ -153,16 +277,89 @@ elif app_mode == "Automated Timetable Generator":
         except Exception as ex:
             st.error(f"Error parsing file: {ex}")
 
-# 3. QR ATTENDANCE SCANNER
+# ----------------- MODULE 3: QR CODE GENERATOR (SINGLE & BULK) -----------------
+elif app_mode == "🪪 ID Card & QR Code Generator":
+    st.subheader("🪪 Generate Attendance QR Codes & Cards")
+    st.write("Create QR codes encoded in the standard EduCrew format (`ID|Name|Role|Class`) for individual people or an entire school roster.")
+
+    gen_tab1, gen_tab2 = st.tabs(["👤 Single Student/Teacher QR", "📁 Bulk Generate from CSV / Excel"])
+
+    with gen_tab1:
+        st.write("#### Create Individual QR Code")
+        s_col1, s_col2 = st.columns(2)
+        with s_col1:
+            s_name = st.text_input("Full Name", value="Muhammad Ali")
+            s_id = st.text_input("Roll No / Staff ID", value="S-1042")
+        with s_col2:
+            s_role = st.selectbox("Role", ["Student", "Teacher", "Staff", "Farm Master"])
+            s_class = st.text_input("Class / Department", value="Class 10th-A")
+
+        if st.button("Generate QR Code"):
+            img = AttendanceService.generate_single_qr(s_id, s_name, s_role, s_class)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            
+            c_preview, c_meta = st.columns([1, 2])
+            with c_preview:
+                st.image(buf.getvalue(), caption=f"QR for {s_name}", width=220)
+            with c_meta:
+                st.success("QR Code Generated!")
+                st.write(f"**Encoded Data:** `{s_id}|{s_name}|{s_role}|{s_class}`")
+                st.download_button(
+                    label="📥 Download QR Image (PNG)",
+                    data=buf.getvalue(),
+                    file_name=f"{s_id}_{s_name.replace(' ', '_')}_qr.png",
+                    mime="image/png"
+                )
+
+    with gen_tab2:
+        st.write("#### Bulk Generate from Roster File")
+        st.write("Upload a CSV or Excel file containing your school roster. The system reads columns like **ID/Roll**, **Name**, **Role**, and **Class**.")
+
+        sample_roster = pd.DataFrame({
+            "ID": ["S101", "S102", "T201", "T202"],
+            "Name": ["Hamza Tariq", "Fatima Bibi", "Mr. Ahmad Khan", "Ms. Ayesha"],
+            "Role": ["Student", "Student", "Teacher - Farm Master", "Teacher"],
+            "Class": ["10th-A", "10th-A", "10th Class", "9th Class"]
+        })
+
+        with st.expander("ℹ️ Download Sample Roster Template"):
+            st.dataframe(sample_roster)
+            st.download_button(
+                "Download Sample CSV",
+                sample_roster.to_csv(index=False).encode("utf-8"),
+                "sample_roster.csv",
+                "text/csv"
+            )
+
+        roster_file = st.file_uploader("Upload Roster File (CSV, Excel)", type=["csv", "xlsx", "xls"])
+        if roster_file:
+            try:
+                if roster_file.name.endswith(".csv"):
+                    df_roster = pd.read_csv(roster_file)
+                else:
+                    df_roster = pd.read_excel(roster_file)
+
+                st.write(f"Loaded {len(df_roster)} records:")
+                st.dataframe(df_roster.head(5), use_container_width=True)
+
+                if st.button("⚡ Bulk Generate All QR Codes (.ZIP)"):
+                    with st.spinner("Generating individual QR codes and assembling ZIP archive..."):
+                        zip_data = AttendanceService.generate_bulk_qr_zip(df_roster)
+                        st.success(f"Generated {len(df_roster)} QR codes successfully!")
+                        st.download_button(
+                            label="📥 Download All QR Codes (ZIP Archive)",
+                            data=zip_data,
+                            file_name="School_Roster_QR_Codes.zip",
+                            mime="application/zip"
+                        )
+            except Exception as e:
+                st.error(f"Error parsing roster file: {e}")
+
+# ----------------- MODULE 4: ATTENDANCE SCANNER -----------------
 elif app_mode == "Live QR Attendance & Agent Monitor":
     st.subheader("📷 Live QR Attendance & Agent Verification")
     st.write("Point an ID card QR code at the camera. The AI Attendance Agent parses the person, checks punctuality against the 8:00 AM bell, and logs the entry.")
-
-    with st.expander("🛠️ Generate Test QR Codes (Print or Scan from Phone Screen)"):
-        st.write("Copy or display any of these sample text strings in any QR generator (format: `ID|Name|Role|Class`):")
-        st.code("T101|Mr. Ahmad Khan|Teacher - Farm Master|Class 10th", language="text")
-        st.code("S502|Zia Malik|Student|Class 10th-A", language="text")
-        st.code("S503|Ayesha Noor|Student|Class 9th-B", language="text")
 
     cam_col, result_col = st.columns([1, 1])
 
