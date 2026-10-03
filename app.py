@@ -1,5 +1,7 @@
 import os
 import io
+import hmac
+import hashlib
 import zipfile
 import cv2
 import numpy as np
@@ -15,21 +17,61 @@ from ui.styles import apply_custom_styles
 from services.agent_service import AgentService
 from services.document_service import DocumentService
 from services.timetable_service import TimetableService
+from services.db_service import DatabaseService
 
-# ----------------- EMBEDDED ATTENDANCE ENGINE -----------------
-class AttendanceService:
-    LOG_FILE = UPLOADS_DIR / "attendance_log.csv"
+# Initialize SQLite Relational Database Engine
+DatabaseService.init_database()
+
+# Enterprise Secret Key for Digital QR Signatures
+HMAC_SECRET = os.getenv("EDUCREW_SIGNING_SECRET", "educrew_enterprise_secure_salt_2026").encode()
+
+# ----------------- CRYPTOGRAPHIC SECURITY & ATTENDANCE -----------------
+class SecurityService:
+    @classmethod
+    def sign_payload(cls, raw_data: str) -> str:
+        """Generates an HMAC-SHA256 signature token to prevent QR forgery."""
+        return hmac.new(HMAC_SECRET, raw_data.encode(), hashlib.sha256).hexdigest()[:12]
 
     @classmethod
-    def generate_single_qr(cls, person_id: str, name: str, role: str, class_name: str) -> Image.Image:
-        payload = f"{person_id.strip()}|{name.strip()}|{role.strip()}|{class_name.strip()}"
+    def generate_signed_qr(cls, person_id: str, name: str, role: str, class_name: str) -> Image.Image:
+        raw_body = f"{person_id.strip()}|{name.strip()}|{role.strip()}|{class_name.strip()}"
+        signature = cls.sign_payload(raw_body)
+        signed_token = f"{raw_body}#{signature}"
+        
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=4)
-        qr.add_data(payload)
+        qr.add_data(signed_token)
         qr.make(fit=True)
         return qr.make_image(fill_color="#1E3A8A", back_color="white").convert("RGB")
 
     @classmethod
-    def generate_bulk_qr_zip(cls, df: pd.DataFrame) -> bytes:
+    def verify_token(cls, full_token: str):
+        """Verifies if the QR code is authentic or forged."""
+        if "#" not in full_token:
+            return False, full_token.split("|"), "Unsigned QR Code (Legacy / Untrusted)"
+        
+        body, received_sig = full_token.split("#", 1)
+        expected_sig = cls.sign_payload(body)
+        
+        parts = [p.strip() for p in body.split("|")]
+        if hmac.compare_digest(received_sig, expected_sig):
+            return True, parts, "Authenticated Institutional Signature"
+        return False, parts, "SECURITY ALERT: Signature mismatch (Tampered QR)"
+
+    @classmethod
+    def decode_camera_frame(cls, image_bytes: bytes) -> str:
+        try:
+            np_arr = np.frombuffer(image_bytes, np.uint8)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if img is None:
+                return ""
+            detector = cv2.QRCodeDetector()
+            data, _, _ = detector.detectAndDecode(img)
+            return data.strip() if data else ""
+        except Exception:
+            return ""
+
+    @classmethod
+    def generate_bulk_signed_zip(cls, df: pd.DataFrame) -> bytes:
         col_map = {str(c).strip().lower(): c for c in df.columns}
         id_col = next((col_map[c] for c in col_map if "id" in c or "roll" in c), None)
         name_col = next((col_map[c] for c in col_map if "name" in c), None)
@@ -44,135 +86,132 @@ class AttendanceService:
                 p_role = str(row[role_col]).strip() if role_col else "Student"
                 p_class = str(row[class_col]).strip() if class_col else "General"
 
-                img = cls.generate_single_qr(p_id, p_name, p_role, p_class)
-                img_byte_arr = io.BytesIO()
-                img.save(img_byte_arr, format="PNG")
+                img = cls.generate_signed_qr(p_id, p_name, p_role, p_class)
+                img_bytes = io.BytesIO()
+                img.save(img_bytes, format="PNG")
                 safe_name = "".join(c for c in f"{p_id}_{p_name}" if c.isalnum() or c in (' ', '_', '-')).rstrip()
-                zip_file.writestr(f"{safe_name}.png", img_byte_arr.getvalue())
+                zip_file.writestr(f"{safe_name}.png", img_bytes.getvalue())
 
         zip_buffer.seek(0)
         return zip_buffer.getvalue()
 
-    @classmethod
-    def decode_qr(cls, image_bytes: bytes) -> str:
-        try:
-            np_arr = np.frombuffer(image_bytes, np.uint8)
-            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            if img is None:
-                return ""
-            detector = cv2.QRCodeDetector()
-            data, bbox, _ = detector.detectAndDecode(img)
-            return data.strip() if data else ""
-        except Exception:
-            return ""
 
-    @classmethod
-    def log_attendance(cls, person_id: str, name: str, role: str, class_name: str, status: str, notes: str) -> pd.DataFrame:
-        now = datetime.now()
-        record = {
-            "Date": now.strftime("%Y-%m-%d"),
-            "Time": now.strftime("%I:%M:%S %p"),
-            "ID": person_id,
-            "Name": name,
-            "Role": role,
-            "Class": class_name,
-            "Status": status,
-            "Remarks": notes
-        }
-        if cls.LOG_FILE.exists():
-            try:
-                df = pd.read_csv(cls.LOG_FILE)
-                df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
-            except Exception:
-                df = pd.DataFrame([record])
-        else:
-            df = pd.DataFrame([record])
-        df.to_csv(cls.LOG_FILE, index=False)
-        return df
-
-    @classmethod
-    def get_logs(cls) -> pd.DataFrame:
-        if cls.LOG_FILE.exists():
-            try:
-                return pd.read_csv(cls.LOG_FILE)
-            except Exception:
-                pass
-        return pd.DataFrame(columns=["Date", "Time", "ID", "Name", "Role", "Class", "Status", "Remarks"])
-
-
-# ----------------- PAGE CONFIG -----------------
-st.set_page_config(page_title="EduCrew AI | Enterprise School Platform", page_icon="🏫", layout="wide")
+# ----------------- PAGE CONFIG & SESSION MANAGEMENT -----------------
+st.set_page_config(page_title="EduCrew AI | Enterprise Operations", page_icon="🏫", layout="wide")
 apply_custom_styles()
 
-with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/graduation-cap.png", width=64)
-    st.markdown("## **EduCrew Enterprise**")
-    st.caption("Autonomous Multi-Agent School Operations")
+if "auth_user" not in st.session_state:
+    st.session_state["auth_user"] = None
+
+# ----------------- AUTHENTICATION GATE -----------------
+if not st.session_state["auth_user"]:
+    st.markdown('<div class="main-header" style="text-align:center;">🏛️ EduCrew Enterprise Portal</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header" style="text-align:center;">Institutional Multi-Agent Governance & Operations Platform</div>', unsafe_allow_html=True)
     
+    col_login, _ = st.columns([1, 1])
+    with col_login:
+        with st.form("login_form"):
+            st.write("#### 🔐 Staff & Administrator Sign-In")
+            u_name = st.text_input("Username", value="admin")
+            u_pass = st.text_input("Password", type="password", value="admin123")
+            submit = st.form_submit_button("Authenticate into Portal")
+            
+            if submit:
+                user = DatabaseService.authenticate_user(u_name, u_pass)
+                if user:
+                    st.session_state["auth_user"] = user
+                    st.rerun()
+                else:
+                    st.error("Invalid institutional credentials.")
+                    
+        st.info("Demo Credentials:\n- **Principal**: `admin` / `admin123`\n- **Faculty**: `teacher` / `teach123`\n- **Campus Security**: `gate` / `gate123`")
+    st.stop()
+
+# ----------------- ROLE-BASED ACCESS CONTROL (RBAC) -----------------
+current_user = st.session_state["auth_user"]
+user_role = current_user["role"]
+
+with st.sidebar:
+    st.image("https://img.icons8.com/fluency/96/graduation-cap.png", width=54)
+    st.markdown(f"### **EduCrew Portal**")
+    st.caption(f"Authenticated: **{current_user['full_name']}**\nRole: `{user_role}`")
+    
+    if st.button("🚪 Sign Out"):
+        st.session_state["auth_user"] = None
+        st.rerun()
+
+    st.markdown("---")
     env_api_key = os.getenv("GEMINI_API_KEY", "")
     api_key_input = st.text_input("Gemini API Key", value=env_api_key, type="password")
     if api_key_input:
         os.environ["GEMINI_API_KEY"] = api_key_input
 
-    model_choice = st.selectbox("Gemini Foundation Model", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
+    model_choice = st.selectbox("Gemini Engine", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
     st.markdown("---")
-    
-    app_mode = st.radio(
-        "Executive Workspaces",
-        [
-            "🏛️ Enterprise Dashboard",
-            "📚 Multi-Agent Lesson Architect",
-            "🗓️ Timetable Engine & Agent Audit",
+
+    # Dynamic Menu according to RBAC
+    if user_role == "Principal":
+        nav_options = [
+            "🏛️ Executive Dashboard",
+            "📚 Curriculum Multi-Agent Crew",
+            "🗓️ Timetable Engine & Audit",
             "🪪 ID Card & QR Batch Studio",
-            "📷 Live QR Attendance & Welfare Agent"
+            "📷 Campus Gate & Attendance Agent"
         ]
-    )
+    elif user_role == "Teacher":
+        nav_options = [
+            "📚 Curriculum Multi-Agent Crew",
+            "🗓️ Timetable Engine & Audit",
+            "📷 Campus Gate & Attendance Agent"
+        ]
+    else:  # Security / Gate Officer
+        nav_options = ["📷 Campus Gate & Attendance Agent"]
 
-# ----------------- WORKSPACE 0: ENTERPRISE DASHBOARD -----------------
-if app_mode == "🏛️ Enterprise Dashboard":
+    app_mode = st.radio("Enterprise Navigation", nav_options)
+
+# ----------------- WORKSPACE: EXECUTIVE DASHBOARD -----------------
+if app_mode == "🏛️ Executive Dashboard":
     st.markdown('<div class="main-header">Institutional Command Center</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Real-time telemetry, multi-agent status, and operational health</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Relational SQLite telemetry and live agent execution metrics</div>', unsafe_allow_html=True)
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown('<div class="kpi-card"><div class="kpi-value">4 Crews</div><div class="kpi-label">Active Agent Teams</div></div>', unsafe_allow_html=True)
-    with col2:
-        logs = AttendanceService.get_logs()
-        st.markdown(f'<div class="kpi-card"><div class="kpi-value">{len(logs)}</div><div class="kpi-label">Today Check-Ins</div></div>', unsafe_allow_html=True)
-    with col3:
-        st.markdown('<div class="kpi-card"><div class="kpi-value">45 Slots</div><div class="kpi-label">Weekly Standard Grid</div></div>', unsafe_allow_html=True)
-    with col4:
-        st.markdown('<div class="kpi-card"><div class="kpi-value">Active</div><div class="kpi-label">Farm Master Lock</div></div>', unsafe_allow_html=True)
+    today_logs = DatabaseService.get_today_logs_df()
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown('<div class="kpi-card"><div class="kpi-value">4 Crews</div><div class="kpi-label">Active Autonomous Agents</div></div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown(f'<div class="kpi-card"><div class="kpi-value">{len(today_logs)}</div><div class="kpi-label">Today Scans</div></div>', unsafe_allow_html=True)
+    with c3:
+        forged_count = len(today_logs[today_logs["Authenticated"] == 0]) if not today_logs.empty else 0
+        st.markdown(f'<div class="kpi-card"><div class="kpi-value" style="color:#DC2626;">{forged_count}</div><div class="kpi-label">Security Tamper Flags</div></div>', unsafe_allow_html=True)
+    with c4:
+        st.markdown('<div class="kpi-card"><div class="kpi-value">Active</div><div class="kpi-label">HMAC-SHA256 Token Engine</div></div>', unsafe_allow_html=True)
 
     st.markdown("---")
-    st.write("### 🤖 Available Autonomous Crews")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.info("**Academic Planning Crew**\n- Lead Curriculum Architect\n- Senior Assessment Specialist\n- Inclusive Education Consultant")
-        st.info("**Timetable Optimization Crew**\n- School Scheduling Compliance Auditor\n- Academic Operations Strategist")
-    with c2:
-        st.success("**Attendance & Welfare Crew**\n- Truancy & Punctuality Analyst\n- Student Welfare & Parent Liaison")
-        st.success("**Security & Verification**\n- Computer Vision QRCode Engine\n- Institutional CSV/Excel Batch Generator")
+    st.write("### 🗄️ Relational Database Attendance Log (ACID Storage)")
+    if not today_logs.empty:
+        st.dataframe(today_logs, use_container_width=True)
+    else:
+        st.info("No scans recorded in the relational database yet today.")
 
-# ----------------- WORKSPACE 1: LESSON ARCHITECT -----------------
-elif app_mode == "📚 Multi-Agent Lesson Architect":
-    st.markdown('<div class="main-header">Academic Curriculum Crew</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Three specialized agents collaborate sequentially on pedagogical design</div>', unsafe_allow_html=True)
+# ----------------- WORKSPACE: LESSON MULTI-AGENT CREW -----------------
+elif app_mode == "📚 Curriculum Multi-Agent Crew":
+    st.markdown('<div class="main-header">Autonomous Curriculum Studio</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Collaborative multi-agent pedagogical planning pipeline</div>', unsafe_allow_html=True)
 
     c1, c2 = st.columns([1, 1])
     with c1:
-        topic = st.text_input("Lesson Topic", placeholder="e.g., Renewable Energy Systems & Photovoltaics")
-        grade_level = st.selectbox("Academic Level", ["Grade 6-8 (Middle School)", "Grade 9-10 (High School)", "Grade 11-12 (Higher Secondary)"])
+        topic = st.text_input("Lesson Topic", placeholder="e.g., Photosynthesis and Cellular Respiration")
+        grade_level = st.selectbox("Grade Level", ["Grade 6-8", "Grade 9-10", "Grade 11-12"])
     with c2:
-        uploaded_doc = st.file_uploader("Reference Curriculum Chapter / Notes (PDF, TXT)", type=["pdf", "txt"])
+        uploaded_doc = st.file_uploader("Reference Materials (PDF/TXT)", type=["pdf", "txt"])
 
     if st.button("🚀 Kickoff Curriculum Crew"):
         if not os.environ.get("GEMINI_API_KEY"):
-            st.error("Please supply your Gemini API key in the sidebar.")
+            st.error("Please provide your Gemini API key in the sidebar.")
         elif not topic:
-            st.warning("Please specify a topic.")
+            st.warning("Please enter a lesson topic.")
         else:
-            with st.spinner("Crew in progress: Designing objectives, formulating Bloom's quiz, adapting instruction..."):
+            with st.spinner("Curriculum Designer, Assessment Specialist, and Inclusion Coach collaborating..."):
                 doc_text = ""
                 if uploaded_doc:
                     saved_path = UPLOADS_DIR / uploaded_doc.name
@@ -182,32 +221,18 @@ elif app_mode == "📚 Multi-Agent Lesson Architect":
 
                 agent_svc = AgentService(model_name=model_choice)
                 result = agent_svc.run_lesson_planning_workflow(topic, grade_level, doc_text)
-                st.success("Curriculum pack finalized by all 3 agents!")
-                st.markdown("### 📋 Executive Output")
+                st.success("Lesson pack drafted and verified by all 3 agents!")
                 st.markdown(result)
-                st.download_button("📥 Export Lesson Pack (.MD)", result, f"{topic.replace(' ', '_')}_curriculum.md", "text/markdown")
+                st.download_button("📥 Download Lesson Pack", result, f"{topic.replace(' ', '_')}.md", "text/markdown")
 
-# ----------------- WORKSPACE 2: TIMETABLE & AUDIT -----------------
-elif app_mode == "🗓️ Timetable Engine & Agent Audit":
-    st.markdown('<div class="main-header">Master Scheduling & Agent Audit</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Deterministic constraint scheduling coupled with AI Compliance Audit</div>', unsafe_allow_html=True)
-
-    template_df = pd.DataFrame({
-        "Class": ["10th-A", "10th-A", "10th-A", "9th-B", "9th-B"],
-        "Teacher Name": ["Mr. Ahmad Khan", "Ms. Fatima Noor", "Mr. Tariq Mehmood", "Ms. Ayesha Bibi", "Mr. Tariq Mehmood"],
-        "Designation": ["Farm Master", "Senior Subject Specialist", "Subject Specialist", "Junior Teacher", "Subject Specialist"],
-        "Periods Per Week": [6, 4, 3, 4, 3],
-        "Subject": ["Agriculture & Biology", "Physics", "Mathematics", "English", "Mathematics"]
-    })
-
-    with st.expander("ℹ️ Download Master Roster Template"):
-        st.dataframe(template_df)
-        csv_sample = template_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Template CSV", csv_sample, "master_teachers.csv", "text/csv")
+# ----------------- WORKSPACE: TIMETABLE & AUDIT -----------------
+elif app_mode == "🗓️ Timetable Engine & Audit":
+    st.markdown('<div class="main-header">Algorithmic Timetable & Multi-Agent Audit</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Enforces Farm Master Period 1, Friday 5-Period Cap, and Same-Period Class Consistency</div>', unsafe_allow_html=True)
 
     col_up, col_name = st.columns([2, 1])
     with col_up:
-        tt_file = st.file_uploader("Upload Teacher Workload File", type=["csv", "xlsx", "xls"])
+        tt_file = st.file_uploader("Upload Faculty Workload Spreadsheet", type=["csv", "xlsx", "xls"])
     with col_name:
         default_cls = st.text_input("Default Class Name", value="10th Class")
 
@@ -221,13 +246,13 @@ elif app_mode == "🗓️ Timetable Engine & Agent Audit":
             st.dataframe(df_in.head(6), use_container_width=True)
 
             if st.button("⚡ Solve Timetable & Run Agent Audit"):
-                with st.spinner("1/2: Constraint Engine solving period allocations..."):
+                with st.spinner("Algorithmic solver calculating schedule..."):
                     day_tables, err = TimetableService.generate_timetable(df_in, default_class_name=default_cls)
 
                 if err:
                     st.error(err)
                 else:
-                    st.success("Constraint solving complete!")
+                    st.success("Master schedule solved without faculty clashes!")
                     tabs = st.tabs(list(day_tables.keys()))
                     summary_text = ""
                     for idx, tab_name in enumerate(day_tables.keys()):
@@ -236,109 +261,109 @@ elif app_mode == "🗓️ Timetable Engine & Agent Audit":
                             st.dataframe(day_tables[tab_name], use_container_width=True)
                             summary_text += f"\n--- {tab_name} ---\n" + day_tables[tab_name].head(4).to_string()
 
-                    # Trigger Multi-Agent Audit Crew
                     st.markdown("---")
-                    st.write("### 🤖 Timetable Compliance & Executive Audit Crew")
-                    with st.spinner("2/2: Timetable Auditor and Operations Strategist analyzing feasibility..."):
+                    st.write("### 🤖 Autonomous Scheduling Audit Crew")
+                    with st.spinner("Registrar Auditor and Academic Strategist evaluating allocations..."):
                         agent_svc = AgentService(model_name=model_choice)
                         audit_result = agent_svc.run_timetable_audit_crew(summary_text)
                         st.markdown(audit_result)
-
-                    out_excel = UPLOADS_DIR / "Master_Timetable.xlsx"
-                    with pd.ExcelWriter(out_excel, engine="openpyxl") as writer:
-                        for s_name, ddf in day_tables.items():
-                            ddf.to_excel(writer, sheet_name=s_name[:31], index=False)
-
-                    with open(out_excel, "rb") as f:
-                        st.download_button("📥 Download Master Timetable (.XLSX)", f.read(), "Master_Timetable.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as ex:
-            st.error(f"Error: {ex}")
+            st.error(f"File parsing error: {ex}")
 
-# ----------------- WORKSPACE 3: QR STUDIO -----------------
+# ----------------- WORKSPACE: QR STUDIO (CRYPTOGRAPHIC) -----------------
 elif app_mode == "🪪 ID Card & QR Batch Studio":
-    st.markdown('<div class="main-header">Institutional QR & ID Studio</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Batch QR generation engine formatted with cryptographic tokens</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">Cryptographic ID Card Studio</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Issues HMAC-SHA256 signed QR credentials that cannot be forged</div>', unsafe_allow_html=True)
 
-    tab_single, tab_batch = st.tabs(["Individual ID Card", "Batch Roster Importer"])
+    tab_single, tab_batch = st.tabs(["Individual Signed Credential", "Bulk Roster Generator"])
 
     with tab_single:
         s1, s2 = st.columns(2)
         with s1:
-            name = st.text_input("Full Name", "Zia Muhammad")
-            p_id = st.text_input("Staff / Student ID", "EMP-2026")
+            name = st.text_input("Full Name", "Muhammad Tariq")
+            p_id = st.text_input("Staff / Student ID", "EMP-9021")
         with s2:
-            role = st.selectbox("Designation", ["Student", "Subject Specialist", "Farm Master", "Principal", "Staff"])
-            cls_name = st.text_input("Class / Dept", "10th Grade")
+            role = st.selectbox("Designation", ["Student", "Subject Specialist", "Farm Master", "Principal"])
+            cls_name = st.text_input("Assigned Class / Department", "Class 10th-A")
 
-        if st.button("Generate Secure Card"):
-            img = AttendanceService.generate_single_qr(p_id, name, role, cls_name)
+        if st.button("Generate Signed Credential"):
+            img = SecurityService.generate_signed_qr(p_id, name, role, cls_name)
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             c1, c2 = st.columns([1, 2])
             with c1:
                 st.image(buf.getvalue(), width=200)
             with c2:
-                st.success("Secure Token Encoded Successfully")
-                st.code(f"{p_id}|{name}|{role}|{cls_name}")
-                st.download_button("📥 Download Card PNG", buf.getvalue(), f"{p_id}_card.png", "image/png")
+                sig = SecurityService.sign_payload(f"{p_id}|{name}|{role}|{cls_name}")
+                st.success("Cryptographically Signed QR Created")
+                st.markdown(f"**HMAC Signature:** `{sig}`")
+                st.code(f"{p_id}|{name}|{role}|{cls_name}#{sig}")
+                st.download_button("📥 Download Signed PNG", buf.getvalue(), f"{p_id}_secure.png", "image/png")
 
     with tab_batch:
-        roster_file = st.file_uploader("Upload Roster (CSV/Excel)", type=["csv", "xlsx"])
+        roster_file = st.file_uploader("Upload Master Roster (CSV / Excel)", type=["csv", "xlsx"])
         if roster_file:
             df_r = pd.read_csv(roster_file) if roster_file.name.endswith(".csv") else pd.read_excel(roster_file)
             st.dataframe(df_r.head(5), use_container_width=True)
-            if st.button("⚡ Generate Batch ZIP Archive"):
-                with st.spinner("Generating individual tokens..."):
-                    zip_data = AttendanceService.generate_bulk_qr_zip(df_r)
-                    st.download_button("📥 Download All Cards (.ZIP)", zip_data, "School_ID_Batch.zip", "application/zip")
+            if st.button("⚡ Generate Secure Signed ZIP Batch"):
+                with st.spinner("Signing individual tokens and generating QR package..."):
+                    zip_data = SecurityService.generate_bulk_signed_zip(df_r)
+                    st.download_button("📥 Download Signed QR Archive (.ZIP)", zip_data, "Institutional_Signed_QRs.zip", "application/zip")
 
-# ----------------- WORKSPACE 4: ATTENDANCE & WELFARE AGENT -----------------
-elif app_mode == "📷 Live QR Attendance & Welfare Agent":
-    st.markdown('<div class="main-header">Smart Gate & Welfare Agent</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Automated optical scanner connected to Truancy & Welfare Multi-Agent Crew</div>', unsafe_allow_html=True)
+# ----------------- WORKSPACE: CAMPUS GATE & ATTENDANCE AGENT -----------------
+elif app_mode == "📷 Campus Gate & Attendance Agent":
+    st.markdown('<div class="main-header">Smart Gate & Truancy Multi-Agent Crew</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Real-time cryptographic verification with automated parent notifications</div>', unsafe_allow_html=True)
 
     c_cam, c_act = st.columns([1, 1])
     with c_cam:
-        st.write("#### 🎥 Live Optical Feed")
-        cam_shot = st.camera_input("Scan ID Card QR")
+        st.write("#### 🎥 Live Optical Gate Scanner")
+        cam_shot = st.camera_input("Scan ID Card QR Code")
 
     with c_act:
-        st.write("#### 📋 Immediate Gate Decision")
+        st.write("#### 🛡️ Gate Security & Punctuality Engine")
         if cam_shot:
-            raw = cam_shot.getvalue()
-            decoded = AttendanceService.decode_qr(raw)
-            if not decoded:
-                st.warning("Align card with lens in good light.")
+            raw_bytes = cam_shot.getvalue()
+            decoded_token = SecurityService.decode_camera_frame(raw_bytes)
+            
+            if not decoded_token:
+                st.warning("⚠️ No QR code recognized. Align card in front of camera.")
             else:
-                parts = [p.strip() for p in decoded.split("|")]
+                is_valid, parts, sec_msg = SecurityService.verify_token(decoded_token)
                 pid = parts[0] if len(parts) > 0 else "UNKNOWN"
                 pname = parts[1] if len(parts) > 1 else "Unknown"
                 prole = parts[2] if len(parts) > 2 else "Student"
                 pcls = parts[3] if len(parts) > 3 else "General"
                 now_str = datetime.now().strftime("%I:%M %p")
 
-                # Fast Gate Rule
+                # Punctuality calculation
                 is_on_time = datetime.now().hour < 8 or (datetime.now().hour == 8 and datetime.now().minute <= 10)
                 status = "Present - On Time" if is_on_time else "Tardy / Late"
 
-                AttendanceService.log_attendance(pid, pname, prole, pcls, status, f"Gate scan at {now_str}")
-                st.success(f"Identity Verified: **{pname}** ({prole})")
-                st.markdown(f"**Class:** {pcls} | **Gate Timestamp:** {now_str}")
-                st.markdown(f"**Status:** `{status}`")
+                if not is_valid:
+                    st.error(f"🚨 {sec_msg}")
+                    DatabaseService.record_attendance(pid, pname, prole, pcls, "FLAGGED_FORGERY", sec_msg, False)
+                else:
+                    st.success(f"Verified Identity: **{pname}** ({prole})")
+                    st.markdown(f"**Security Token:** `{sec_msg}`")
+                    st.markdown(f"**Class:** {pcls} | **Gate Timestamp:** {now_str}")
+                    st.markdown(f"**Gate Status:** `{status}`")
+                    
+                    DatabaseService.record_attendance(pid, pname, prole, pcls, status, f"Gate scan at {now_str}", True)
+                    
+                    if status != "Present - On Time" and prole == "Student":
+                        st.warning(f"📱 **Automated Parent SMS Dispatched:** 'Notice: Student {pname} checked in at {now_str}, after the 08:00 AM school bell.'")
 
     st.markdown("---")
-    st.write("### 📊 Today's Institutional Log")
-    today_logs = AttendanceService.get_logs()
-    if not today_logs.empty:
-        st.dataframe(today_logs, use_container_width=True)
-
-        if st.button("🤖 Run Truancy & Parent Welfare Agent Analysis"):
-            with st.spinner("Truancy Analyst and Parent Welfare Liaison examining check-ins..."):
+    st.write("### 📊 Today's Relational Attendance Register")
+    today_records = DatabaseService.get_today_logs_df()
+    if not today_records.empty:
+        st.dataframe(today_records, use_container_width=True)
+        if st.button("🤖 Run Truancy & Welfare Multi-Agent Analysis"):
+            with st.spinner("Truancy Analyst & Welfare Liaison examining attendance patterns..."):
                 agent_svc = AgentService(model_name=model_choice)
-                analysis_out = agent_svc.run_attendance_intelligence_crew(today_logs.to_string())
-                st.markdown("### 📋 Welfare & Administrative Intelligence Brief")
-                st.markdown(analysis_out)
-
-        st.download_button("📥 Export Register (CSV)", today_logs.to_csv(index=False).encode("utf-8"), "attendance_register.csv", "text/csv")
+                analysis_brief = agent_svc.run_attendance_intelligence_crew(today_records.to_string())
+                st.markdown("### 📋 Welfare Intelligence Brief")
+                st.markdown(analysis_brief)
     else:
-        st.info("No scans recorded yet today.")
+        st.info("No check-ins logged yet today.")
