@@ -110,6 +110,37 @@ class AgentService:
             expected_output="SMS notification drafts and an administrative guidance note.",
             agent=welfare_agent
         )
+    # ---------------- 4. ID CARD CREDENTIAL OFFICER CREW ----------------
+    def run_id_card_credential_crew(self, roster_summary: str) -> str:
+        compliance_officer = Agent(
+            role="Registrar Compliance & Identity Auditor",
+            goal="Audit batch roster records for valid formatting, required contacts, and role consistency.",
+            backstory="Official institutional registrar responsible for student & faculty credentials issuance.",
+            llm=self.llm,
+            verbose=False
+        )
+
+        security_officer = Agent(
+            role="Campus Identity & Security Officer",
+            goal="Verify cryptographic token parameters and generate batch issuance authorization memo.",
+            backstory="Campus security director ensuring every issued credential meets anti-forgery standards.",
+            llm=self.llm,
+            verbose=False
+        )
+
+        t1 = Task(
+            description=f"Inspect this roster data for official ID card creation. Check missing fields, emergency contacts, and class/department formats:\n{roster_summary}",
+            expected_output="Roster audit report highlighting total records verified, data quality score, and any flagged entries.",
+            agent=compliance_officer
+        )
+        t2 = Task(
+            description="Generate an Official Institutional Credential Issuance Authorization Memo approving the print batch with security instructions.",
+            expected_output="An official 3-paragraph issuance memo with Authorization Reference ID, Stamp, and Distribution guidelines.",
+            agent=security_officer
+        )
+
+        crew = Crew(agents=[compliance_officer, security_officer], tasks=[t1, t2], process=Process.sequential)
+        return str(crew.kickoff())
 
         crew = Crew(agents=[truancy_agent, welfare_agent], tasks=[t1, t2], process=Process.sequential)
         return str(crew.kickoff())
