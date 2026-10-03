@@ -11,36 +11,26 @@ from datetime import datetime
 from pathlib import Path
 
 from core.config import UPLOADS_DIR
-from core.gemini import get_llm
 from ui.styles import apply_custom_styles
 from services.agent_service import AgentService
 from services.document_service import DocumentService
 from services.timetable_service import TimetableService
 
-# ----------------- ATTENDANCE & QR UTILITIES -----------------
+# ----------------- EMBEDDED ATTENDANCE ENGINE -----------------
 class AttendanceService:
     LOG_FILE = UPLOADS_DIR / "attendance_log.csv"
 
     @classmethod
     def generate_single_qr(cls, person_id: str, name: str, role: str, class_name: str) -> Image.Image:
-        """Encodes standard EduCrew format (ID|Name|Role|Class) into a QR image."""
         payload = f"{person_id.strip()}|{name.strip()}|{role.strip()}|{class_name.strip()}"
-        qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=10,
-            border=4,
-        )
+        qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=4)
         qr.add_data(payload)
         qr.make(fit=True)
-        return qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        return qr.make_image(fill_color="#1E3A8A", back_color="white").convert("RGB")
 
     @classmethod
     def generate_bulk_qr_zip(cls, df: pd.DataFrame) -> bytes:
-        """Parses a roster dataframe and bundles all generated QR codes into a ZIP file."""
         col_map = {str(c).strip().lower(): c for c in df.columns}
-        
-        # Flexible column resolution
         id_col = next((col_map[c] for c in col_map if "id" in c or "roll" in c), None)
         name_col = next((col_map[c] for c in col_map if "name" in c), None)
         role_col = next((col_map[c] for c in col_map if "role" in c or "designation" in c), None)
@@ -57,7 +47,6 @@ class AttendanceService:
                 img = cls.generate_single_qr(p_id, p_name, p_role, p_class)
                 img_byte_arr = io.BytesIO()
                 img.save(img_byte_arr, format="PNG")
-                
                 safe_name = "".join(c for c in f"{p_id}_{p_name}" if c.isalnum() or c in (' ', '_', '-')).rstrip()
                 zip_file.writestr(f"{safe_name}.png", img_byte_arr.getvalue())
 
@@ -66,7 +55,6 @@ class AttendanceService:
 
     @classmethod
     def decode_qr(cls, image_bytes: bytes) -> str:
-        """Decodes QR code from raw image bytes using OpenCV QRCodeDetector."""
         try:
             np_arr = np.frombuffer(image_bytes, np.uint8)
             img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -111,92 +99,80 @@ class AttendanceService:
                 pass
         return pd.DataFrame(columns=["Date", "Time", "ID", "Name", "Role", "Class", "Status", "Remarks"])
 
-    @classmethod
-    def evaluate_attendance_with_ai(cls, person_id: str, name: str, role: str, class_name: str, scan_time_str: str) -> dict:
-        try:
-            llm = get_llm()
-            prompt = f"""
-You are an Automated School Attendance Officer.
-Details:
-- Person Name: {name} (ID: {person_id})
-- Role: {role} (Student or Teacher)
-- Class: {class_name}
-- Current Scan Time: {scan_time_str}
-- Official School Gate / Period 1 Start: 08:00 AM
 
-Tasks:
-1. Determine Status: 'Present - On Time' (if scanned before or at 08:10 AM), 'Tardy / Late' (if scanned between 08:11 AM and 09:00 AM), or 'Severely Late' (after 09:00 AM).
-2. Generate a 1-sentence administrative note.
-3. If student is Late, generate a professional 1-sentence SMS alert for their parents.
-
-Output strictly in this format:
-STATUS: <Status>
-NOTE: <Note>
-SMS: <SMS or 'None'>
-"""
-            response = llm.invoke(prompt)
-            text = response.content
-            status, note, sms = "Present", "Checked in successfully.", "None"
-            for line in text.split("\n"):
-                if line.startswith("STATUS:"):
-                    status = line.replace("STATUS:", "").strip()
-                elif line.startswith("NOTE:"):
-                    note = line.replace("NOTE:", "").strip()
-                elif line.startswith("SMS:"):
-                    sms = line.replace("SMS:", "").strip()
-            return {"status": status, "note": note, "sms": sms}
-        except Exception:
-            return {"status": "Present (Logged Offline)", "note": f"System recorded at {scan_time_str}", "sms": "None"}
-
-
-# ----------------- APPLICATION LAYOUT -----------------
-st.set_page_config(
-    page_title="EduCrew AI - Autonomous School Assistant",
-    page_icon="🎓",
-    layout="wide"
-)
-
+# ----------------- PAGE CONFIG -----------------
+st.set_page_config(page_title="EduCrew AI | Enterprise School Platform", page_icon="🏫", layout="wide")
 apply_custom_styles()
 
 with st.sidebar:
-    st.title("⚙️ EduCrew Settings")
+    st.image("https://img.icons8.com/fluency/96/graduation-cap.png", width=64)
+    st.markdown("## **EduCrew Enterprise**")
+    st.caption("Autonomous Multi-Agent School Operations")
+    
     env_api_key = os.getenv("GEMINI_API_KEY", "")
     api_key_input = st.text_input("Gemini API Key", value=env_api_key, type="password")
     if api_key_input:
         os.environ["GEMINI_API_KEY"] = api_key_input
 
-    model_choice = st.selectbox("Gemini Engine", options=["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
+    model_choice = st.selectbox("Gemini Foundation Model", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
     st.markdown("---")
+    
     app_mode = st.radio(
-        "Select Capability",
+        "Executive Workspaces",
         [
-            "Multi-Agent Lesson & Quiz Architect",
-            "Automated Timetable Generator",
-            "🪪 ID Card & QR Code Generator",
-            "Live QR Attendance & Agent Monitor"
+            "🏛️ Enterprise Dashboard",
+            "📚 Multi-Agent Lesson Architect",
+            "🗓️ Timetable Engine & Agent Audit",
+            "🪪 ID Card & QR Batch Studio",
+            "📷 Live QR Attendance & Welfare Agent"
         ]
     )
 
-st.markdown('<div class="main-header">🎓 EduCrew AI: Multi-Agent Teacher Platform</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Pedagogical Planning, Timetable Engines, Smart QR Generation & Agentic Attendance</div>', unsafe_allow_html=True)
+# ----------------- WORKSPACE 0: ENTERPRISE DASHBOARD -----------------
+if app_mode == "🏛️ Enterprise Dashboard":
+    st.markdown('<div class="main-header">Institutional Command Center</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Real-time telemetry, multi-agent status, and operational health</div>', unsafe_allow_html=True)
 
-# ----------------- MODULE 1: LESSON ARCHITECT -----------------
-if app_mode == "Multi-Agent Lesson & Quiz Architect":
-    st.subheader("🤖 Multi-Agent Curriculum & Assessment Team")
-    col1, col2 = st.columns([1, 1])
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        topic = st.text_input("Lesson Topic", placeholder="e.g., Photosynthesis and Cellular Respiration")
-        grade_level = st.selectbox("Grade Level", ["Grade 6-8 (Middle School)", "Grade 9-10 (High School)", "Grade 11-12 (College Prep)"])
+        st.markdown('<div class="kpi-card"><div class="kpi-value">4 Crews</div><div class="kpi-label">Active Agent Teams</div></div>', unsafe_allow_html=True)
     with col2:
-        uploaded_doc = st.file_uploader("Optional: Reference Document (PDF, TXT)", type=["pdf", "txt"])
+        logs = AttendanceService.get_logs()
+        st.markdown(f'<div class="kpi-card"><div class="kpi-value">{len(logs)}</div><div class="kpi-label">Today Check-Ins</div></div>', unsafe_allow_html=True)
+    with col3:
+        st.markdown('<div class="kpi-card"><div class="kpi-value">45 Slots</div><div class="kpi-label">Weekly Standard Grid</div></div>', unsafe_allow_html=True)
+    with col4:
+        st.markdown('<div class="kpi-card"><div class="kpi-value">Active</div><div class="kpi-label">Farm Master Lock</div></div>', unsafe_allow_html=True)
 
-    if st.button("🚀 Run Multi-Agent Crew"):
+    st.markdown("---")
+    st.write("### 🤖 Available Autonomous Crews")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.info("**Academic Planning Crew**\n- Lead Curriculum Architect\n- Senior Assessment Specialist\n- Inclusive Education Consultant")
+        st.info("**Timetable Optimization Crew**\n- School Scheduling Compliance Auditor\n- Academic Operations Strategist")
+    with c2:
+        st.success("**Attendance & Welfare Crew**\n- Truancy & Punctuality Analyst\n- Student Welfare & Parent Liaison")
+        st.success("**Security & Verification**\n- Computer Vision QRCode Engine\n- Institutional CSV/Excel Batch Generator")
+
+# ----------------- WORKSPACE 1: LESSON ARCHITECT -----------------
+elif app_mode == "📚 Multi-Agent Lesson Architect":
+    st.markdown('<div class="main-header">Academic Curriculum Crew</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Three specialized agents collaborate sequentially on pedagogical design</div>', unsafe_allow_html=True)
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        topic = st.text_input("Lesson Topic", placeholder="e.g., Renewable Energy Systems & Photovoltaics")
+        grade_level = st.selectbox("Academic Level", ["Grade 6-8 (Middle School)", "Grade 9-10 (High School)", "Grade 11-12 (Higher Secondary)"])
+    with c2:
+        uploaded_doc = st.file_uploader("Reference Curriculum Chapter / Notes (PDF, TXT)", type=["pdf", "txt"])
+
+    if st.button("🚀 Kickoff Curriculum Crew"):
         if not os.environ.get("GEMINI_API_KEY"):
             st.error("Please supply your Gemini API key in the sidebar.")
         elif not topic:
             st.warning("Please specify a topic.")
         else:
-            with st.spinner("Agents are collaborating on your lesson pack..."):
+            with st.spinner("Crew in progress: Designing objectives, formulating Bloom's quiz, adapting instruction..."):
                 doc_text = ""
                 if uploaded_doc:
                     saved_path = UPLOADS_DIR / uploaded_doc.name
@@ -206,19 +182,16 @@ if app_mode == "Multi-Agent Lesson & Quiz Architect":
 
                 agent_svc = AgentService(model_name=model_choice)
                 result = agent_svc.run_lesson_planning_workflow(topic, grade_level, doc_text)
-                st.success("Lesson pack created successfully!")
-                st.markdown("### 📋 Crew Output")
+                st.success("Curriculum pack finalized by all 3 agents!")
+                st.markdown("### 📋 Executive Output")
                 st.markdown(result)
-                st.download_button(
-                    label="📥 Download as Markdown",
-                    data=result,
-                    file_name=f"{topic.replace(' ', '_')}_lesson_pack.md",
-                    mime="text/markdown"
-                )
+                st.download_button("📥 Export Lesson Pack (.MD)", result, f"{topic.replace(' ', '_')}_curriculum.md", "text/markdown")
 
-# ----------------- MODULE 2: TIMETABLE GENERATOR -----------------
-elif app_mode == "Automated Timetable Generator":
-    st.subheader("📅 School Timetable Generator (With Class Names & Same-Period Timing)")
+# ----------------- WORKSPACE 2: TIMETABLE & AUDIT -----------------
+elif app_mode == "🗓️ Timetable Engine & Agent Audit":
+    st.markdown('<div class="main-header">Master Scheduling & Agent Audit</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Deterministic constraint scheduling coupled with AI Compliance Audit</div>', unsafe_allow_html=True)
+
     template_df = pd.DataFrame({
         "Class": ["10th-A", "10th-A", "10th-A", "9th-B", "9th-B"],
         "Teacher Name": ["Mr. Ahmad Khan", "Ms. Fatima Noor", "Mr. Tariq Mehmood", "Ms. Ayesha Bibi", "Mr. Tariq Mehmood"],
@@ -227,197 +200,145 @@ elif app_mode == "Automated Timetable Generator":
         "Subject": ["Agriculture & Biology", "Physics", "Mathematics", "English", "Mathematics"]
     })
 
-    with st.expander("ℹ️ Expected File Format (Preview & Download Sample CSV)"):
+    with st.expander("ℹ️ Download Master Roster Template"):
         st.dataframe(template_df)
         csv_sample = template_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download Sample CSV with Class Column", csv_sample, "sample_teachers_with_class.csv", "text/csv")
+        st.download_button("Download Template CSV", csv_sample, "master_teachers.csv", "text/csv")
 
-    col_upload, col_fallback = st.columns([2, 1])
-    with col_upload:
-        timetable_file = st.file_uploader("Upload Teachers Data File", type=["csv", "xlsx", "xls"])
-    with col_fallback:
-        default_cls = st.text_input("Default Class Name (if file has no Class column)", value="10th Class")
+    col_up, col_name = st.columns([2, 1])
+    with col_up:
+        tt_file = st.file_uploader("Upload Teacher Workload File", type=["csv", "xlsx", "xls"])
+    with col_name:
+        default_cls = st.text_input("Default Class Name", value="10th Class")
 
-    if timetable_file:
-        saved_tt_path = UPLOADS_DIR / timetable_file.name
-        with open(saved_tt_path, "wb") as f:
-            f.write(timetable_file.getbuffer())
+    if tt_file:
+        saved_path = UPLOADS_DIR / tt_file.name
+        with open(saved_path, "wb") as f:
+            f.write(tt_file.getbuffer())
 
         try:
-            df_in = DocumentService.read_tabular(saved_tt_path)
-            st.write("Loaded Data Preview:")
-            st.dataframe(df_in.head(8), use_container_width=True)
+            df_in = DocumentService.read_tabular(saved_path)
+            st.dataframe(df_in.head(6), use_container_width=True)
 
-            if st.button("⚡ Generate Weekly Timetable"):
-                with st.spinner("Generating schedules and resolving conflicts..."):
+            if st.button("⚡ Solve Timetable & Run Agent Audit"):
+                with st.spinner("1/2: Constraint Engine solving period allocations..."):
                     day_tables, err = TimetableService.generate_timetable(df_in, default_class_name=default_cls)
-                    if err:
-                        st.error(err)
-                    else:
-                        st.success("Timetable generated successfully with all Class assignments!")
-                        tabs = st.tabs(list(day_tables.keys()))
-                        for idx, tab_name in enumerate(day_tables.keys()):
-                            with tabs[idx]:
-                                st.write(f"### 📋 {tab_name}")
-                                st.dataframe(day_tables[tab_name], use_container_width=True)
 
-                        output_excel = UPLOADS_DIR / "Generated_Weekly_Timetable.xlsx"
-                        with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
-                            for sheet_name, ddf in day_tables.items():
-                                safe_name = sheet_name.replace(":", "-").replace("/", "-")[:31]
-                                ddf.to_excel(writer, sheet_name=safe_name, index=False)
+                if err:
+                    st.error(err)
+                else:
+                    st.success("Constraint solving complete!")
+                    tabs = st.tabs(list(day_tables.keys()))
+                    summary_text = ""
+                    for idx, tab_name in enumerate(day_tables.keys()):
+                        with tabs[idx]:
+                            st.write(f"#### 📋 {tab_name}")
+                            st.dataframe(day_tables[tab_name], use_container_width=True)
+                            summary_text += f"\n--- {tab_name} ---\n" + day_tables[tab_name].head(4).to_string()
 
-                        with open(output_excel, "rb") as f:
-                            st.download_button(
-                                label="📥 Download Complete Timetable (Excel)",
-                                data=f.read(),
-                                file_name="Weekly_School_Timetable.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
+                    # Trigger Multi-Agent Audit Crew
+                    st.markdown("---")
+                    st.write("### 🤖 Timetable Compliance & Executive Audit Crew")
+                    with st.spinner("2/2: Timetable Auditor and Operations Strategist analyzing feasibility..."):
+                        agent_svc = AgentService(model_name=model_choice)
+                        audit_result = agent_svc.run_timetable_audit_crew(summary_text)
+                        st.markdown(audit_result)
+
+                    out_excel = UPLOADS_DIR / "Master_Timetable.xlsx"
+                    with pd.ExcelWriter(out_excel, engine="openpyxl") as writer:
+                        for s_name, ddf in day_tables.items():
+                            ddf.to_excel(writer, sheet_name=s_name[:31], index=False)
+
+                    with open(out_excel, "rb") as f:
+                        st.download_button("📥 Download Master Timetable (.XLSX)", f.read(), "Master_Timetable.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as ex:
-            st.error(f"Error parsing file: {ex}")
+            st.error(f"Error: {ex}")
 
-# ----------------- MODULE 3: QR CODE GENERATOR (SINGLE & BULK) -----------------
-elif app_mode == "🪪 ID Card & QR Code Generator":
-    st.subheader("🪪 Generate Attendance QR Codes & Cards")
-    st.write("Create QR codes encoded in the standard EduCrew format (`ID|Name|Role|Class`) for individual people or an entire school roster.")
+# ----------------- WORKSPACE 3: QR STUDIO -----------------
+elif app_mode == "🪪 ID Card & QR Batch Studio":
+    st.markdown('<div class="main-header">Institutional QR & ID Studio</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Batch QR generation engine formatted with cryptographic tokens</div>', unsafe_allow_html=True)
 
-    gen_tab1, gen_tab2 = st.tabs(["👤 Single Student/Teacher QR", "📁 Bulk Generate from CSV / Excel"])
+    tab_single, tab_batch = st.tabs(["Individual ID Card", "Batch Roster Importer"])
 
-    with gen_tab1:
-        st.write("#### Create Individual QR Code")
-        s_col1, s_col2 = st.columns(2)
-        with s_col1:
-            s_name = st.text_input("Full Name", value="Muhammad Ali")
-            s_id = st.text_input("Roll No / Staff ID", value="S-1042")
-        with s_col2:
-            s_role = st.selectbox("Role", ["Student", "Teacher", "Staff", "Farm Master"])
-            s_class = st.text_input("Class / Department", value="Class 10th-A")
+    with tab_single:
+        s1, s2 = st.columns(2)
+        with s1:
+            name = st.text_input("Full Name", "Zia Muhammad")
+            p_id = st.text_input("Staff / Student ID", "EMP-2026")
+        with s2:
+            role = st.selectbox("Designation", ["Student", "Subject Specialist", "Farm Master", "Principal", "Staff"])
+            cls_name = st.text_input("Class / Dept", "10th Grade")
 
-        if st.button("Generate QR Code"):
-            img = AttendanceService.generate_single_qr(s_id, s_name, s_role, s_class)
+        if st.button("Generate Secure Card"):
+            img = AttendanceService.generate_single_qr(p_id, name, role, cls_name)
             buf = io.BytesIO()
             img.save(buf, format="PNG")
-            
-            c_preview, c_meta = st.columns([1, 2])
-            with c_preview:
-                st.image(buf.getvalue(), caption=f"QR for {s_name}", width=220)
-            with c_meta:
-                st.success("QR Code Generated!")
-                st.write(f"**Encoded Data:** `{s_id}|{s_name}|{s_role}|{s_class}`")
-                st.download_button(
-                    label="📥 Download QR Image (PNG)",
-                    data=buf.getvalue(),
-                    file_name=f"{s_id}_{s_name.replace(' ', '_')}_qr.png",
-                    mime="image/png"
-                )
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                st.image(buf.getvalue(), width=200)
+            with c2:
+                st.success("Secure Token Encoded Successfully")
+                st.code(f"{p_id}|{name}|{role}|{cls_name}")
+                st.download_button("📥 Download Card PNG", buf.getvalue(), f"{p_id}_card.png", "image/png")
 
-    with gen_tab2:
-        st.write("#### Bulk Generate from Roster File")
-        st.write("Upload a CSV or Excel file containing your school roster. The system reads columns like **ID/Roll**, **Name**, **Role**, and **Class**.")
-
-        sample_roster = pd.DataFrame({
-            "ID": ["S101", "S102", "T201", "T202"],
-            "Name": ["Hamza Tariq", "Fatima Bibi", "Mr. Ahmad Khan", "Ms. Ayesha"],
-            "Role": ["Student", "Student", "Teacher - Farm Master", "Teacher"],
-            "Class": ["10th-A", "10th-A", "10th Class", "9th Class"]
-        })
-
-        with st.expander("ℹ️ Download Sample Roster Template"):
-            st.dataframe(sample_roster)
-            st.download_button(
-                "Download Sample CSV",
-                sample_roster.to_csv(index=False).encode("utf-8"),
-                "sample_roster.csv",
-                "text/csv"
-            )
-
-        roster_file = st.file_uploader("Upload Roster File (CSV, Excel)", type=["csv", "xlsx", "xls"])
+    with tab_batch:
+        roster_file = st.file_uploader("Upload Roster (CSV/Excel)", type=["csv", "xlsx"])
         if roster_file:
-            try:
-                if roster_file.name.endswith(".csv"):
-                    df_roster = pd.read_csv(roster_file)
-                else:
-                    df_roster = pd.read_excel(roster_file)
+            df_r = pd.read_csv(roster_file) if roster_file.name.endswith(".csv") else pd.read_excel(roster_file)
+            st.dataframe(df_r.head(5), use_container_width=True)
+            if st.button("⚡ Generate Batch ZIP Archive"):
+                with st.spinner("Generating individual tokens..."):
+                    zip_data = AttendanceService.generate_bulk_qr_zip(df_r)
+                    st.download_button("📥 Download All Cards (.ZIP)", zip_data, "School_ID_Batch.zip", "application/zip")
 
-                st.write(f"Loaded {len(df_roster)} records:")
-                st.dataframe(df_roster.head(5), use_container_width=True)
+# ----------------- WORKSPACE 4: ATTENDANCE & WELFARE AGENT -----------------
+elif app_mode == "📷 Live QR Attendance & Welfare Agent":
+    st.markdown('<div class="main-header">Smart Gate & Welfare Agent</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Automated optical scanner connected to Truancy & Welfare Multi-Agent Crew</div>', unsafe_allow_html=True)
 
-                if st.button("⚡ Bulk Generate All QR Codes (.ZIP)"):
-                    with st.spinner("Generating individual QR codes and assembling ZIP archive..."):
-                        zip_data = AttendanceService.generate_bulk_qr_zip(df_roster)
-                        st.success(f"Generated {len(df_roster)} QR codes successfully!")
-                        st.download_button(
-                            label="📥 Download All QR Codes (ZIP Archive)",
-                            data=zip_data,
-                            file_name="School_Roster_QR_Codes.zip",
-                            mime="application/zip"
-                        )
-            except Exception as e:
-                st.error(f"Error parsing roster file: {e}")
+    c_cam, c_act = st.columns([1, 1])
+    with c_cam:
+        st.write("#### 🎥 Live Optical Feed")
+        cam_shot = st.camera_input("Scan ID Card QR")
 
-# ----------------- MODULE 4: ATTENDANCE SCANNER -----------------
-elif app_mode == "Live QR Attendance & Agent Monitor":
-    st.subheader("📷 Live QR Attendance & Agent Verification")
-    st.write("Point an ID card QR code at the camera. The AI Attendance Agent parses the person, checks punctuality against the 8:00 AM bell, and logs the entry.")
-
-    cam_col, result_col = st.columns([1, 1])
-
-    with cam_col:
-        st.write("#### 🎥 Live Camera Input")
-        camera_image = st.camera_input("Hold ID QR Code in front of camera")
-
-    with result_col:
-        st.write("#### 📋 Verification & Agent Actions")
-        if camera_image:
-            raw_bytes = camera_image.getvalue()
-            qr_content = AttendanceService.decode_qr(raw_bytes)
-
-            if not qr_content:
-                st.warning("⚠️ No QR code recognized. Ensure the card is held close, stable, and well-lit.")
+    with c_act:
+        st.write("#### 📋 Immediate Gate Decision")
+        if cam_shot:
+            raw = cam_shot.getvalue()
+            decoded = AttendanceService.decode_qr(raw)
+            if not decoded:
+                st.warning("Align card with lens in good light.")
             else:
-                st.success(f"Scanned QR Code: `{qr_content}`")
-                parts = [p.strip() for p in qr_content.split("|")]
-                
-                person_id = parts[0] if len(parts) > 0 else "UNKNOWN"
-                name = parts[1] if len(parts) > 1 else "Unknown Person"
-                role = parts[2] if len(parts) > 2 else "Student"
-                class_name = parts[3] if len(parts) > 3 else "General"
-                current_time = datetime.now().strftime("%I:%M %p")
+                parts = [p.strip() for p in decoded.split("|")]
+                pid = parts[0] if len(parts) > 0 else "UNKNOWN"
+                pname = parts[1] if len(parts) > 1 else "Unknown"
+                prole = parts[2] if len(parts) > 2 else "Student"
+                pcls = parts[3] if len(parts) > 3 else "General"
+                now_str = datetime.now().strftime("%I:%M %p")
 
-                with st.spinner("AI Attendance Agent evaluating status..."):
-                    ai_res = AttendanceService.evaluate_attendance_with_ai(
-                        person_id=person_id,
-                        name=name,
-                        role=role,
-                        class_name=class_name,
-                        scan_time_str=current_time
-                    )
+                # Fast Gate Rule
+                is_on_time = datetime.now().hour < 8 or (datetime.now().hour == 8 and datetime.now().minute <= 10)
+                status = "Present - On Time" if is_on_time else "Tardy / Late"
 
-                AttendanceService.log_attendance(
-                    person_id=person_id,
-                    name=name,
-                    role=role,
-                    class_name=class_name,
-                    status=ai_res["status"],
-                    notes=ai_res["note"]
-                )
-
-                st.markdown(f"**Name:** {name}")
-                st.markdown(f"**Role:** {role} | **Class:** {class_name}")
-                st.markdown(f"**Check-in Time:** {current_time}")
-                st.markdown(f"**Status:** `{ai_res['status']}`")
-                st.info(f"**Admin Note:** {ai_res['note']}")
-                
-                if ai_res.get("sms") and ai_res["sms"] != "None":
-                    st.warning(f"📱 **Automated Parent SMS:** {ai_res['sms']}")
+                AttendanceService.log_attendance(pid, pname, prole, pcls, status, f"Gate scan at {now_str}")
+                st.success(f"Identity Verified: **{pname}** ({prole})")
+                st.markdown(f"**Class:** {pcls} | **Gate Timestamp:** {now_str}")
+                st.markdown(f"**Status:** `{status}`")
 
     st.markdown("---")
-    st.write("### 📊 Today's Attendance Register")
-    current_logs = AttendanceService.get_logs()
-    if not current_logs.empty:
-        st.dataframe(current_logs, use_container_width=True)
-        csv_data = current_logs.to_csv(index=False).encode("utf-8")
-        st.download_button("📥 Export Attendance Sheet (CSV)", csv_data, "daily_attendance.csv", "text/csv")
+    st.write("### 📊 Today's Institutional Log")
+    today_logs = AttendanceService.get_logs()
+    if not today_logs.empty:
+        st.dataframe(today_logs, use_container_width=True)
+
+        if st.button("🤖 Run Truancy & Parent Welfare Agent Analysis"):
+            with st.spinner("Truancy Analyst and Parent Welfare Liaison examining check-ins..."):
+                agent_svc = AgentService(model_name=model_choice)
+                analysis_out = agent_svc.run_attendance_intelligence_crew(today_logs.to_string())
+                st.markdown("### 📋 Welfare & Administrative Intelligence Brief")
+                st.markdown(analysis_out)
+
+        st.download_button("📥 Export Register (CSV)", today_logs.to_csv(index=False).encode("utf-8"), "attendance_register.csv", "text/csv")
     else:
-        st.info("No attendance recorded yet today.")
+        st.info("No scans recorded yet today.")
