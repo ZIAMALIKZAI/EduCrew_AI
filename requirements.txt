@@ -10,3 +10,4 @@ opencv-python-headless>=4.9.0.80
 qrcode>=7.4.2
 pillow>=10.3.0
 watchdog>=4.0.0
+reportlab>=4.1.0
