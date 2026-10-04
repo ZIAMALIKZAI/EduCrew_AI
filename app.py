@@ -153,14 +153,15 @@ with st.sidebar:
     if api_key_input:
         os.environ["GEMINI_API_KEY"] = api_key_input
 
-    model_choice = st.selectbox("Gemini Engine", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
+    # Updated to active 2.5 foundation models to resolve 404 NOT_FOUND
+    model_choice = st.selectbox("Gemini Engine", ["gemini-2.5-flash", "gemini-2.5-pro"], index=0)
     st.markdown("---")
 
     if user_role == "Principal":
         nav = [
             "🏛️ Institutional Dashboard",
             "🪪 Student Official ID Card Studio",
-            "👨‍‍🏫 Faculty & Staff Official Card Studio",
+            "👨‍🏫 Faculty & Staff Official Card Studio",
             "🗓️ Timetable Engine & Audit",
             "📚 Multi-Agent Lesson Architect",
             "📷 Campus Gate & Attendance Agent"
@@ -414,7 +415,7 @@ elif app_mode == "📚 Multi-Agent Lesson Architect":
     st.markdown('<div class="main-header">Autonomous Curriculum Studio</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Collaborative multi-agent pedagogical design with direct PDF and Markdown export</div>', unsafe_allow_html=True)
 
-    # Initialize session state for persistent download across re-renders
+    # Initialize session state keys for reliable re-rendering
     if "current_lesson_result" not in st.session_state:
         st.session_state["current_lesson_result"] = None
     if "current_lesson_pdf" not in st.session_state:
@@ -464,7 +465,7 @@ elif app_mode == "📚 Multi-Agent Lesson Architect":
                 st.session_state["current_lesson_grade"] = grade_level
 
     # Render results and persistent download buttons if present in state
-    if st.session_state["current_lesson_result"]:
+    if st.session_state.get("current_lesson_result"):
         st.success("Lesson pack drafted and verified by all autonomous agents!")
         st.markdown(st.session_state["current_lesson_result"])
 
@@ -472,16 +473,17 @@ elif app_mode == "📚 Multi-Agent Lesson Architect":
         st.write("### 📥 Download Institutional Deliverables")
         col_pdf, col_md = st.columns(2)
 
-        safe_topic = st.session_state["current_lesson_topic"].replace(' ', '_')
-        safe_grade = st.session_state["current_lesson_grade"].replace(' ', '_').replace('/', '_')
+        safe_topic = str(st.session_state.get("current_lesson_topic", "Lesson")).replace(' ', '_')
+        safe_grade = str(st.session_state.get("current_lesson_grade", "General")).replace(' ', '_').replace('/', '_')
 
-        with col_pdf:
-            st.download_button(
-                label="📄 Download Official Printable Lesson Pack (PDF)",
-                data=st.session_state["current_lesson_pdf"],
-                file_name=f"{safe_topic}_{safe_grade}_Lesson_Pack.pdf",
-                mime="application/pdf"
-            )
+        if st.session_state.get("current_lesson_pdf"):
+            with col_pdf:
+                st.download_button(
+                    label="📄 Download Official Printable Lesson Pack (PDF)",
+                    data=st.session_state["current_lesson_pdf"],
+                    file_name=f"{safe_topic}_{safe_grade}_Lesson_Pack.pdf",
+                    mime="application/pdf"
+                )
 
         with col_md:
             st.download_button(
