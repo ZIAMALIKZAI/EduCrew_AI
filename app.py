@@ -14,6 +14,7 @@ from services.document_service import DocumentService
 from services.timetable_service import TimetableService
 from services.db_service import DatabaseService
 from services.card_service import IDCardService
+from services.pdf_service import PDFReportService
 
 DatabaseService.init_database()
 
@@ -159,7 +160,7 @@ with st.sidebar:
         nav = [
             "🏛️ Institutional Dashboard",
             "🪪 Student Official ID Card Studio",
-            "👨‍🏫 Faculty & Staff Official Card Studio",
+            "👨‍‍🏫 Faculty & Staff Official Card Studio",
             "🗓️ Timetable Engine & Audit",
             "📚 Multi-Agent Lesson Architect",
             "📷 Campus Gate & Attendance Agent"
@@ -194,7 +195,7 @@ if app_mode == "🏛️ Institutional Dashboard":
         st.markdown('<div class="kpi-card"><div class="kpi-value">Locked P-1</div><div class="kpi-label">Farm Master Mon-Sat</div></div>', unsafe_allow_html=True)
 
     st.markdown("---")
-    st.write("### 🗄️️ Relational Database Check-In Ledger")
+    st.write("### 🗄 Relational Database Check-In Ledger")
     if not today_logs.empty:
         st.dataframe(today_logs, use_container_width=True)
     else:
@@ -411,7 +412,17 @@ elif app_mode == "🗓️ Timetable Engine & Audit":
 # ----------------- 5. CURRICULUM MULTI-AGENT CREW -----------------
 elif app_mode == "📚 Multi-Agent Lesson Architect":
     st.markdown('<div class="main-header">Autonomous Curriculum Studio</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Collaborative multi-agent pedagogical design for Primary, Middle, and Matriculation</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Collaborative multi-agent pedagogical design with direct PDF and Markdown export</div>', unsafe_allow_html=True)
+
+    # Initialize session state for persistent download across re-renders
+    if "current_lesson_result" not in st.session_state:
+        st.session_state["current_lesson_result"] = None
+    if "current_lesson_pdf" not in st.session_state:
+        st.session_state["current_lesson_pdf"] = None
+    if "current_lesson_topic" not in st.session_state:
+        st.session_state["current_lesson_topic"] = ""
+    if "current_lesson_grade" not in st.session_state:
+        st.session_state["current_lesson_grade"] = ""
 
     c1, c2 = st.columns([1, 1])
     with c1:
@@ -419,8 +430,9 @@ elif app_mode == "📚 Multi-Agent Lesson Architect":
         grade_level = st.selectbox("Grade Level", PAK_CLASSES, index=6)
     with c2:
         uploaded_doc = st.file_uploader(
-        "Optional: Reference Book Chapter (PDF, TXT, or Photo: JPG, PNG)",   type=["pdf", "txt", "jpg", "jpeg", "png", "webp"]
-)
+            "Optional: Reference Book Chapter (PDF, TXT, or Photo: JPG, PNG)",
+            type=["pdf", "txt", "jpg", "jpeg", "png", "webp"]
+        )
 
     if st.button("🚀 Kickoff Curriculum Crew"):
         if not os.environ.get("GEMINI_API_KEY"):
@@ -428,7 +440,7 @@ elif app_mode == "📚 Multi-Agent Lesson Architect":
         elif not topic:
             st.warning("Please specify a topic.")
         else:
-            with st.spinner("Curriculum Designer, Assessment Specialist, and Inclusion Coach collaborating..."):
+            with st.spinner("Curriculum Designer, Assessment Specialist, Inclusion Coach, Lab Specialist, and Board Architect collaborating..."):
                 doc_text = ""
                 if uploaded_doc:
                     saved_path = UPLOADS_DIR / uploaded_doc.name
@@ -438,9 +450,46 @@ elif app_mode == "📚 Multi-Agent Lesson Architect":
 
                 agent_svc = AgentService(model_name=model_choice)
                 result = agent_svc.run_lesson_planning_workflow(topic, grade_level, doc_text)
-                st.success("Lesson pack drafted and verified!")
-                st.markdown(result)
-                st.download_button("📥 Download Lesson Pack", result, f"{topic.replace(' ', '_')}.md", "text/markdown")
+
+                pdf_bytes = PDFReportService.generate_lesson_pdf(
+                    topic=topic,
+                    grade_level=grade_level,
+                    markdown_content=result,
+                    school_name="GOVERNMENT HIGH SCHOOL"
+                )
+
+                st.session_state["current_lesson_result"] = result
+                st.session_state["current_lesson_pdf"] = pdf_bytes
+                st.session_state["current_lesson_topic"] = topic
+                st.session_state["current_lesson_grade"] = grade_level
+
+    # Render results and persistent download buttons if present in state
+    if st.session_state["current_lesson_result"]:
+        st.success("Lesson pack drafted and verified by all autonomous agents!")
+        st.markdown(st.session_state["current_lesson_result"])
+
+        st.markdown("---")
+        st.write("### 📥 Download Institutional Deliverables")
+        col_pdf, col_md = st.columns(2)
+
+        safe_topic = st.session_state["current_lesson_topic"].replace(' ', '_')
+        safe_grade = st.session_state["current_lesson_grade"].replace(' ', '_').replace('/', '_')
+
+        with col_pdf:
+            st.download_button(
+                label="📄 Download Official Printable Lesson Pack (PDF)",
+                data=st.session_state["current_lesson_pdf"],
+                file_name=f"{safe_topic}_{safe_grade}_Lesson_Pack.pdf",
+                mime="application/pdf"
+            )
+
+        with col_md:
+            st.download_button(
+                label="📝 Download Editable Source (Markdown)",
+                data=st.session_state["current_lesson_result"],
+                file_name=f"{safe_topic}.md",
+                mime="text/markdown"
+            )
 
 # ----------------- 6. CAMPUS GATE SCANNER & ATTENDANCE -----------------
 elif app_mode == "📷 Campus Gate & Attendance Agent":
@@ -480,7 +529,7 @@ elif app_mode == "📷 Campus Gate & Attendance Agent":
                         DatabaseService.record_attendance(adm_no, s_name, f"Student ({c_name})", c_name, status, f"Gate scan at {now_str}", True)
                         if status != "Present - On Time":
                             st.warning(f"📱 **Parent SMS Dispatched to {emg}:** 'Notice: Student {s_name} (Class {c_name}, Roll {r_no}) checked in at {now_str}, after the 08:00 AM bell.'")
-                    
+
                     elif entity_type == "STAFF":
                         # Staff Token: STAFF|EmpID|Name|Designation|Department|Mobile
                         e_id, t_name, desig, dept, phone = parts[1], parts[2], parts[3], parts[4], parts[5]
