@@ -23,7 +23,7 @@ class DocumentService:
                 "Do not include any introductory or meta commentary."
             )
             response = client.models.generate_content(
-                model="gemini-1.5-flash",
+                model="gemini-2.5-flash",
                 contents=[img, prompt]
             )
             return response.text.strip() if response and response.text else ""
