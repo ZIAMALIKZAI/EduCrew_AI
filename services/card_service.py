@@ -13,9 +13,21 @@ class IDCardService:
     @classmethod
     def sign_payload(cls, raw_data: str) -> str:
         """Generates HMAC-SHA256 signature for Pakistani Institutional Cards."""
-        return hmac.new(HMAC_SECRET, raw_data.encode(), hashlib.sha256).hexdigest()[:12]
+        clean_data = str(raw_data) if raw_data is not None else ""
+        return hmac.new(HMAC_SECRET, clean_data.encode("utf-8"), hashlib.sha256).hexdigest()[:12]
 
-    # ---------------- 1. STUDENT OFFICIAL CARD (PAKISTANI SYSTEM) ----------------
+    @staticmethod
+    def _clean_str(val, default=""):
+        """Safely converts any Pandas cell (NaN, float, int, None) to a clean string."""
+        if val is None or pd.isna(val):
+            return default
+        s = str(val).strip()
+        # Remove trailing .0 if an integer was parsed as float (e.g. roll number 12.0)
+        if s.endswith(".0"):
+            s = s[:-2]
+        return s if s else default
+
+    # ---------------- 1. STUDENT OFFICIAL CARD ----------------
     @classmethod
     def create_student_card(
         cls,
@@ -31,23 +43,31 @@ class IDCardService:
         school_phone: str = "+92 91 1234567",
         school_email: str = "info@school.edu.pk"
     ) -> Image.Image:
-        """
-        Renders an authentic, professional Pakistani Student ID Card (600x980 px).
-        Supports Nursery, KG, Prep, Class 1 to Class 10/12.
-        """
+        admission_no = cls._clean_str(admission_no, "ADM-NEW")
+        roll_no = cls._clean_str(roll_no, "1")
+        student_name = cls._clean_str(student_name, "STUDENT")
+        father_name = cls._clean_str(father_name, "GUARDIAN")
+        class_name = cls._clean_str(class_name, "Class 10th")
+        section = cls._clean_str(section, "A")
+        blood_group = cls._clean_str(blood_group, "O+")
+        emergency_contact = cls._clean_str(emergency_contact, "N/A")
+        school_name = cls._clean_str(school_name, "GOVERNMENT SCHOOL")
+        school_phone = cls._clean_str(school_phone, "+92 000 0000000")
+        school_email = cls._clean_str(school_email, "info@school.edu.pk")
+
         width, height = 600, 980
         card = Image.new("RGB", (width, height), "#FFFFFF")
         draw = ImageDraw.Draw(card)
 
-        # Header - Emerald/Green standard for Student Badges
+        # Header - Emerald Green
         draw.rectangle([(0, 0), (width, 150)], fill="#065F46")
-        draw.rectangle([(0, 150), (width, 160)], fill="#F59E0B")  # Gold ribbon
+        draw.rectangle([(0, 150), (width, 160)], fill="#F59E0B")
 
         draw.text((width // 2, 45), school_name.upper(), fill="#FFFFFF", anchor="mm")
         draw.text((width // 2, 85), "STUDENT IDENTITY CARD", fill="#D1FAE5", anchor="mm")
         draw.text((width // 2, 120), "ACADEMIC SESSION: 2026 - 2027", fill="#FDE68A", anchor="mm")
 
-        # Student Avatar Placeholder
+        # Avatar placeholder
         center_x = width // 2
         avatar_y = 250
         radius = 70
@@ -56,22 +76,22 @@ class IDCardService:
         draw.ellipse([(center_x - 28, avatar_y - 40), (center_x + 28, avatar_y + 10)], fill="#94A3B8")
         draw.chord([(center_x - 50, avatar_y - 5), (center_x + 50, avatar_y + 65)], 0, 180, fill="#94A3B8")
 
-        # Class & Section Pill Badge
+        # Class Pill Badge
         badge_text = f"STUDENT • {class_name.upper()} ({section.upper()})"
-        draw.rounded_rectangle([(center_x - 160, 345), (center_x + 160, 380)], radius=17, fill="#065F46")
+        draw.rounded_rectangle([(center_x - 170, 345), (center_x + 170, 380)], radius=17, fill="#065F46")
         draw.text((center_x, 362), badge_text, fill="#FFFFFF", anchor="mm")
 
         # Student Name
         draw.text((center_x, 415), student_name.upper(), fill="#0F172A", anchor="mm")
 
-        # Student Academic Data Grid
+        # Data Box
         box_top = 450
         draw.rounded_rectangle([(35, box_top), (width - 35, box_top + 185)], radius=12, fill="#F8FAFC", outline="#E2E8F0", width=2)
 
         fields = [
             ("Father's Name :", father_name.title()),
             ("Admission No   :", admission_no),
-            ("Class Roll No  :", str(roll_no)),
+            ("Class Roll No  :", roll_no),
             ("Blood Group    :", blood_group),
             ("Emergency Call :", emergency_contact)
         ]
@@ -83,7 +103,7 @@ class IDCardService:
             draw.text((220, y_offset), str(val), fill=val_color)
             y_offset += 32
 
-        # Signed QR Code (Encodes: STU|AdmissionNo|Name|Class|RollNo|Contact)
+        # Signed QR Code
         raw_body = f"STU|{admission_no}|{student_name}|{class_name}|{roll_no}|{emergency_contact}"
         sig = cls.sign_payload(raw_body)
         signed_token = f"{raw_body}#{sig}"
@@ -96,7 +116,7 @@ class IDCardService:
 
         draw.text((center_x, 825), "SCAN AT CAMPUS GATE FOR DAILY ATTENDANCE", fill="#64748B", anchor="mm")
 
-        # Official School Contact Footer
+        # Footer
         draw.rectangle([(0, 860), (width, height)], fill="#0F172A")
         draw.text((center_x, 888), f"School Phone: {school_phone} | Email: {school_email}", fill="#E2E8F0", anchor="mm")
         draw.text((center_x, 920), "PROPERTY OF INSTITUTION - IF FOUND RETURN TO PRINCIPAL OFFICE", fill="#94A3B8", anchor="mm")
@@ -104,7 +124,7 @@ class IDCardService:
 
         return card
 
-    # ---------------- 2. TEACHER / STAFF CARD (PAKISTANI SYSTEM) ----------------
+    # ---------------- 2. FACULTY & STAFF OFFICIAL CARD ----------------
     @classmethod
     def create_staff_card(
         cls,
@@ -121,23 +141,32 @@ class IDCardService:
         institution_name: str = "GOVERNMENT HIGH SCHOOL",
         school_phone: str = "+92 91 1234567"
     ) -> Image.Image:
-        """
-        Renders an authentic, professional Pakistani Faculty & Staff ID Card (600x980 px).
-        Tailored for: PST, EST, SST, Subject Specialist, Farm Master, Principal, Lab Incharge.
-        """
+        emp_id = cls._clean_str(emp_id, "EMP-001")
+        staff_name = cls._clean_str(staff_name, "STAFF")
+        designation = cls._clean_str(designation, "Teacher")
+        bps_scale = cls._clean_str(bps_scale, "16")
+        department = cls._clean_str(department, "Academics")
+        cnic_no = cls._clean_str(cnic_no, "N/A")
+        official_email = cls._clean_str(official_email, "staff@school.edu.pk")
+        mobile_no = cls._clean_str(mobile_no, "N/A")
+        emergency_contact = cls._clean_str(emergency_contact, "N/A")
+        blood_group = cls._clean_str(blood_group, "O+")
+        institution_name = cls._clean_str(institution_name, "GOVERNMENT SCHOOL")
+        school_phone = cls._clean_str(school_phone, "+92 000 0000000")
+
         width, height = 600, 980
         card = Image.new("RGB", (width, height), "#FFFFFF")
         draw = ImageDraw.Draw(card)
 
-        # Header - Deep Navy Blue for Faculty/Staff
+        # Header - Navy Blue
         draw.rectangle([(0, 0), (width, 150)], fill="#1E3A8A")
-        draw.rectangle([(0, 150), (width, 160)], fill="#F59E0B")  # Gold accent
+        draw.rectangle([(0, 150), (width, 160)], fill="#F59E0B")
 
         draw.text((width // 2, 45), institution_name.upper(), fill="#FFFFFF", anchor="mm")
         draw.text((width // 2, 85), "FACULTY & OFFICIAL STAFF CARD", fill="#DBEAFE", anchor="mm")
         draw.text((width // 2, 120), "EDUCATION & LITERACY DEPARTMENT", fill="#FDE68A", anchor="mm")
 
-        # Staff Avatar Circle
+        # Staff Avatar
         center_x = width // 2
         avatar_y = 250
         radius = 70
@@ -146,15 +175,15 @@ class IDCardService:
         draw.ellipse([(center_x - 28, avatar_y - 40), (center_x + 28, avatar_y + 10)], fill="#1E3A8A")
         draw.chord([(center_x - 50, avatar_y - 5), (center_x + 50, avatar_y + 65)], 0, 180, fill="#1E3A8A")
 
-        # Designation & BPS Badge Chip
+        # Chip
         chip_text = f"{designation.upper()} (BPS-{bps_scale})"
-        draw.rounded_rectangle([(center_x - 175, 345), (center_x + 175, 380)], radius=17, fill="#1E3A8A")
+        draw.rounded_rectangle([(center_x - 180, 345), (center_x + 180, 380)], radius=17, fill="#1E3A8A")
         draw.text((center_x, 362), chip_text, fill="#FFFFFF", anchor="mm")
 
         # Staff Name
         draw.text((center_x, 415), staff_name.upper(), fill="#0F172A", anchor="mm")
 
-        # Staff Official Data Grid
+        # Data Box
         box_top = 445
         draw.rounded_rectangle([(35, box_top), (width - 35, box_top + 205)], radius=12, fill="#F8FAFC", outline="#E2E8F0", width=2)
 
@@ -175,7 +204,7 @@ class IDCardService:
             draw.text((230, y_offset), str(val), fill=val_color)
             y_offset += 26
 
-        # Signed QR Code (Encodes: STAFF|EmpID|Name|Designation|BPS|Phone)
+        # Signed QR Code
         raw_body = f"STAFF|{emp_id}|{staff_name}|{designation}|{department}|{mobile_no}"
         sig = cls.sign_payload(raw_body)
         signed_token = f"{raw_body}#{sig}"
@@ -196,7 +225,7 @@ class IDCardService:
 
         return card
 
-    # ---------------- 3. BULK ZIP GENERATION ----------------
+    # ---------------- 3. BULK ZIP BUILDERS (CRASH-PROOF) ----------------
     @classmethod
     def generate_bulk_student_cards_zip(cls, df: pd.DataFrame, school_name: str, school_phone: str, school_email: str) -> bytes:
         col_map = {str(c).strip().lower(): c for c in df.columns}
@@ -213,14 +242,14 @@ class IDCardService:
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
             for idx, r in df.iterrows():
-                adm = str(r[adm_col]).strip() if adm_col else f"ADM-{idx+1001}"
-                roll = str(r[roll_col]).strip() if roll_col else f"{idx+1}"
-                name = str(r[name_col]).strip() if name_col else f"Student_{idx+1}"
-                father = str(r[father_col]).strip() if father_col else "Guardian"
-                c_name = str(r[class_col]).strip() if class_col else "Class 10th"
-                sec = str(r[sec_col]).strip() if sec_col else "A"
-                bld = str(r[blood_col]).strip() if blood_col and pd.notna(r[blood_col]) else "B+"
-                emg = str(r[emg_col]).strip() if emg_col and pd.notna(r[emg_col]) else "+92 300 0000000"
+                adm = cls._clean_str(r[adm_col] if adm_col else None, f"ADM-{idx+1001}")
+                roll = cls._clean_str(r[roll_col] if roll_col else None, str(idx+1))
+                name = cls._clean_str(r[name_col] if name_col else None, f"Student_{idx+1}")
+                father = cls._clean_str(r[father_col] if father_col else None, "Guardian")
+                c_name = cls._clean_str(r[class_col] if class_col else None, "Class 10th")
+                sec = cls._clean_str(r[sec_col] if sec_col else None, "A")
+                bld = cls._clean_str(r[blood_col] if blood_col else None, "O+")
+                emg = cls._clean_str(r[emg_col] if emg_col else None, "+92 300 0000000")
 
                 card = cls.create_student_card(
                     admission_no=adm,
@@ -237,7 +266,10 @@ class IDCardService:
                 )
                 b = io.BytesIO()
                 card.save(b, format="PNG")
-                safe_name = "".join(c for c in f"{c_name}_{roll}_{name}" if c.isalnum() or c in (' ', '_', '-')).rstrip()
+                
+                # Sanitize filename
+                raw_filename = f"{c_name}_{roll}_{name}"
+                safe_name = "".join(c for c in raw_filename if c.isalnum() or c in (' ', '_', '-')).strip()
                 z.writestr(f"{safe_name}.png", b.getvalue())
 
         zip_buf.seek(0)
@@ -261,16 +293,16 @@ class IDCardService:
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
             for idx, r in df.iterrows():
-                e_id = str(r[id_col]).strip() if id_col else f"EMP-{idx+501}"
-                t_name = str(r[name_col]).strip() if name_col else f"Teacher_{idx+1}"
-                desig = str(r[desig_col]).strip() if desig_col else "Subject Specialist"
-                bps = str(r[bps_col]).strip() if bps_col else "17"
-                dept = str(r[dept_col]).strip() if dept_col else "Academics"
-                cnic = str(r[cnic_col]).strip() if cnic_col else "17301-0000000-0"
-                email = str(r[email_col]).strip() if email_col else f"staff{idx+1}@school.edu.pk"
-                phone = str(r[phone_col]).strip() if phone_col else "+92 300 0000000"
-                emg = str(r[emg_col]).strip() if emg_col and pd.notna(r[emg_col]) else "+92 301 0000000"
-                blood = str(r[blood_col]).strip() if blood_col and pd.notna(r[blood_col]) else "O+"
+                e_id = cls._clean_str(r[id_col] if id_col else None, f"EMP-{idx+501}")
+                t_name = cls._clean_str(r[name_col] if name_col else None, f"Teacher_{idx+1}")
+                desig = cls._clean_str(r[desig_col] if desig_col else None, "Subject Specialist")
+                bps = cls._clean_str(r[bps_col] if bps_col else None, "16")
+                dept = cls._clean_str(r[dept_col] if dept_col else None, "Academics")
+                cnic = cls._clean_str(r[cnic_col] if cnic_col else None, "17301-0000000-0")
+                email = cls._clean_str(r[email_col] if email_col else None, f"staff{idx+1}@school.edu.pk")
+                phone = cls._clean_str(r[phone_col] if phone_col else None, "+92 300 0000000")
+                emg = cls._clean_str(r[emg_col] if emg_col else None, "+92 301 0000000")
+                blood = cls._clean_str(r[blood_col] if blood_col else None, "O+")
 
                 card = cls.create_staff_card(
                     emp_id=e_id,
@@ -288,7 +320,9 @@ class IDCardService:
                 )
                 b = io.BytesIO()
                 card.save(b, format="PNG")
-                safe_name = "".join(c for c in f"{desig}_{t_name}" if c.isalnum() or c in (' ', '_', '-')).rstrip()
+                
+                raw_filename = f"{desig}_{t_name}"
+                safe_name = "".join(c for c in raw_filename if c.isalnum() or c in (' ', '_', '-')).strip()
                 z.writestr(f"{safe_name}.png", b.getvalue())
 
         zip_buf.seek(0)
