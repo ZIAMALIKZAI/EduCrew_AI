@@ -418,7 +418,9 @@ elif app_mode == "📚 Multi-Agent Lesson Architect":
         topic = st.text_input("Lesson Topic", placeholder="e.g., Photosynthesis & Plant Physiology")
         grade_level = st.selectbox("Grade Level", PAK_CLASSES, index=6)
     with c2:
-        uploaded_doc = st.file_uploader("Reference Curriculum Chapter (PDF/TXT)", type=["pdf", "txt"])
+        uploaded_doc = st.file_uploader(
+        "Optional: Reference Book Chapter (PDF, TXT, or Photo: JPG, PNG)",   type=["pdf", "txt", "jpg", "jpeg", "png", "webp"]
+)
 
     if st.button("🚀 Kickoff Curriculum Crew"):
         if not os.environ.get("GEMINI_API_KEY"):
