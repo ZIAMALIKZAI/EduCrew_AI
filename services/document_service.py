@@ -3,28 +3,29 @@ from pathlib import Path
 import pandas as pd
 from pypdf import PdfReader
 from PIL import Image
-import google.generativeai as genai
+from google import genai
 from core.config import GEMINI_API_KEY
 
 class DocumentService:
     @classmethod
     def extract_text_from_image(cls, image_path: Path) -> str:
-        """Uses Gemini Vision to read textbook pages from photographs or scans."""
+        """Uses Gemini Vision (via google-genai) to transcribe textbook pages and notes."""
         api_key = os.environ.get("GEMINI_API_KEY") or GEMINI_API_KEY
         if not api_key:
             return ""
-        
+
         try:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            client = genai.Client(api_key=api_key)
             img = Image.open(image_path)
-            
             prompt = (
                 "You are an academic OCR specialist. Transcribe all text, headings, "
                 "diagram descriptions, questions, and curriculum content from this textbook page clearly into text. "
-                "Do not include meta commentary."
+                "Do not include any introductory or meta commentary."
             )
-            response = model.generate_content([prompt, img])
+            response = client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=[img, prompt]
+            )
             return response.text.strip() if response and response.text else ""
         except Exception as e:
             return f"[Error transcribing textbook image: {e}]"
@@ -43,11 +44,11 @@ class DocumentService:
             try:
                 reader = PdfReader(str(file_path))
                 text_parts = []
-                for idx, page in enumerate(reader.pages):
+                for page in reader.pages:
                     page_text = page.extract_text()
                     if page_text:
                         text_parts.append(page_text)
-                    if len(text_parts) >= 15:  # Cap at 15 pages to keep context focused
+                    if len(text_parts) >= 15:  # Cap at 15 pages for focused context
                         break
                 return "\n".join(text_parts)
             except Exception as e:
